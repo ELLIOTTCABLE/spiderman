@@ -1,0 +1,5 @@
+{
+   "name": "spiderman",
+   "version": "0.1.0",
+   "description": "Pairs this Claude Code session with a peer model running in pi"
+}

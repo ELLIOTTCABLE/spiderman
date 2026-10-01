@@ -1,0 +1,89 @@
+{
+   "hooks": {
+      "SessionStart": [
+         {
+            "hooks": [
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": [
+                     "${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts",
+                     "SessionStart",
+                     "1",
+                     "1"
+                  ],
+                  "timeout": 15
+               }
+            ]
+         }
+      ],
+      "UserPromptSubmit": [
+         {
+            "hooks": [
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": [
+                     "${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts",
+                     "UserPromptSubmit",
+                     "1",
+                     "4"
+                  ],
+                  "timeout": 40
+               },
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": [
+                     "${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts",
+                     "UserPromptSubmit",
+                     "2",
+                     "4"
+                  ],
+                  "timeout": 40
+               },
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": [
+                     "${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts",
+                     "UserPromptSubmit",
+                     "3",
+                     "4"
+                  ],
+                  "timeout": 40
+               },
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": [
+                     "${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts",
+                     "UserPromptSubmit",
+                     "4",
+                     "4"
+                  ],
+                  "timeout": 40
+               }
+            ]
+         }
+      ],
+      "Stop": [
+         {
+            "hooks": [
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts", "Stop", "1", "2"],
+                  "timeout": 420
+               },
+               {
+                  "type": "command",
+                  "command": "node",
+                  "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook.ts", "Stop", "2", "2"],
+                  "timeout": 420
+               }
+            ]
+         }
+      ]
+   }
+}
