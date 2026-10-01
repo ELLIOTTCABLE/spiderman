@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { formatPeerPackage, type PackageEnv, packageText } from "./package.ts"
-import type { Trail, TrailItem } from "./trail.ts"
+import type { Trail, TrailItem, TrailReport } from "./trail.ts"
 
 function fakeEnv(files: Record<string, string> = {}) {
    const stored = new Map<string, string>()
@@ -253,13 +253,38 @@ test("a failed edit is a marker with the attempted diff by reference", () => {
    assert.equal(stored.get("peer/1.txt"), "-x\n+y")
 })
 
-test("an oversized edit is referenced instead of inlined", () => {
-   const old = "z\n".repeat(1500)
+test("an edit over the inline cap is its line counts and a stored diff", () => {
    const t = trail(
-      call("e", "Edit", { file_path: "a", old_string: old, new_string: "" }),
+      call("e", "Edit", {
+         file_path: "a.md",
+         old_string: "old line\n".repeat(100),
+         new_string: "new line\n".repeat(80),
+      }),
       ok("e", ""),
    )
-   assert.deepEqual(body(t), ["[tool] edit a → diff peer/1.txt (1501 lines)"])
+   assert.deepEqual(body(t), ["[tool] edit a.md (+80/−100 lines) → diff peer/1.txt"])
+})
+
+test("many mid-size edits stay within a budget: the largest become stored diffs first", () => {
+   const { env, stored } = fakeEnv()
+   const edits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].flatMap((n): TrailItem[] => [
+      call(`e${n}`, "Edit", {
+         file_path: `n${n}.md`,
+         old_string: "x".repeat(600 + n * 50),
+         new_string: "y",
+      }),
+      ok(`e${n}`, ""),
+   ])
+   const pkg = formatPeerPackage(trail(...edits), env)
+   const inline = pkg.segments.filter((s) => s.text.includes("```diff"))
+   const inlineChars = inline.reduce((n, s) => n + s.text.length, 0)
+   assert.ok(inline.length > 0 && inline.length < 10, `${inline.length} inline`)
+   assert.ok(inlineChars <= 8_000, `${inlineChars} chars inline`)
+   assert.ok(
+      inline.every((s) => !s.text.includes("n10.md")),
+      "the largest went first",
+   )
+   assert.equal(stored.size, 10, "every diff is stored, inline or not")
 })
 
 test("a write is path and line count; the content is stored only if the file changed since", () => {
@@ -397,4 +422,197 @@ test("multi-block text becomes one segment per markdown block", () => {
    )
    const prose = pkg.segments.filter((s) => s.kind === "prose").map((s) => s.text)
    assert.deepEqual(prose, ["Para.", "```\na\n\nb\n```", "- x\n- y"])
+})
+
+const report = (fields: Partial<TrailReport>): TrailReport => ({
+   kind: "report",
+   id: undefined,
+   agent: undefined,
+   label: undefined,
+   text: "",
+   ...fields,
+})
+
+test("a background subagent's call says so; its later report is labelled with its task", () => {
+   const t = trail(
+      call("s", "Agent", { description: "Scan notes", prompt: "Scan every note." }),
+      { kind: "result", id: "s", text: "", isError: false, background: true },
+      { kind: "text", text: "Meanwhile, more work." },
+      report({ id: "s", agent: "a1", label: "Scan notes", text: "Found three." }),
+   )
+   assert.deepEqual(body(t), [
+      "[tool] subagent: Scan notes (full prompt: peer/1.txt) → running in the background",
+      "Meanwhile, more work.",
+      "[subagent report: Scan notes]\nFound three.",
+   ])
+})
+
+test("a report from a subagent started earlier says so, with its status and transcript", () => {
+   const { env } = fakeEnv()
+   const pkg = formatPeerPackage(
+      trail(
+         report({
+            id: "gone",
+            agent: "a1",
+            label: "Scan notes",
+            text: "Partial findings.",
+            status: "killed",
+            transcript: "s/agent-a1.jsonl",
+         }),
+      ),
+      env,
+   )
+   assert.deepEqual(packageText(pkg).split("\n\n").slice(1, -1), [
+      "[subagent report: Scan notes] (started earlier; killed; transcript: s/agent-a1.jsonl)\nPartial findings.",
+   ])
+   assert.deepEqual(pkg.interactions, [
+      { id: "gone", tool: "subagent", kind: "report", pointers: ["s/agent-a1.jsonl"] },
+   ])
+})
+
+test("a long report is cut with the full text by reference, and compacts losslessly", () => {
+   const { env, stored } = fakeEnv()
+   const text = "finding\n".repeat(400)
+   const pkg = formatPeerPackage(trail(report({ label: "Scan", text })), env)
+   const [shown] = pkg.segments.filter((s) => s.kind === "report")
+   assert.ok(shown !== undefined)
+   assert.ok(shown.text.length < 1_700, `${shown.text.length}`)
+   assert.match(shown.text, /\n… \(full report: peer\/1\.txt\)$/)
+   assert.equal(
+      shown.compact,
+      "[subagent report: Scan] (started earlier) → 400 lines, peer/1.txt",
+   )
+   assert.equal(stored.get("peer/1.txt"), text)
+})
+
+test("a subagent that ended without a report is one line", () => {
+   assert.deepEqual(body(trail(report({ label: "Scan", status: "killed" }))), [
+      "[subagent finished: Scan] (started earlier; killed) → no report",
+   ])
+})
+
+test("a turn cut short says how", () => {
+   assert.deepEqual(
+      body(
+         trail(
+            { kind: "text", text: "Starting." },
+            { kind: "halt", why: "interrupted" },
+            { kind: "halt", why: "error", detail: "WebSocket closed 1012" },
+            { kind: "halt", why: "aborted" },
+         ),
+      ),
+      [
+         "Starting.",
+         "[the human interrupted the peer here]",
+         "[the peer's turn ended with an error: WebSocket closed 1012]",
+         "[the peer's turn was aborted here]",
+      ],
+   )
+})
+
+test("a message to a subagent shows its summary, the full message by reference", () => {
+   const { env, stored } = fakeEnv()
+   const message = "Please wrap up.\n".repeat(30)
+   const t = trail(
+      call("m", "SendMessage", { to: "a1", summary: "wrap up", message }),
+      ok("m", "Message sent."),
+      call("s", "steer_subagent", { agent_id: "a2", message: "Stop now." }),
+      ok("s", "Steering message sent."),
+   )
+   assert.deepEqual(body(t, env), [
+      "[tool] message to subagent a1: wrap up (full message: peer/1.txt)",
+      "[tool] message to subagent a2: Stop now.",
+   ])
+   assert.equal(stored.get("peer/1.txt"), message)
+})
+
+test("an image read points at the file and says what it was", () => {
+   const t = trail(call("r", "Read", { file_path: "spec.pdf" }), {
+      kind: "result",
+      id: "r",
+      text: "PDF file read",
+      isError: false,
+      media: "3 images",
+   })
+   const pkg = formatPeerPackage(t, fakeEnv().env)
+   assert.deepEqual(packageText(pkg).split("\n\n").slice(1, -1), [
+      "[tool] read spec.pdf (3 images)",
+   ])
+   assert.deepEqual(pkg.interactions[0]?.pointers, ["spec.pdf"])
+})
+
+test("pi's todo bookkeeping is dropped like Claude Code's", () => {
+   const t = trail(
+      call("n", "todo", { action: "create", subject: "x" }),
+      ok("n", "Created"),
+   )
+   assert.deepEqual(body(t), [])
+})
+
+test("reading back what was just written adds nothing", () => {
+   const content = "one\ntwo\n"
+   const { env } = fakeEnv({ "n.md": content })
+   const t = trail(
+      call("w", "Write", { file_path: "n.md", content }),
+      ok("w", "File created"),
+      call("r", "Read", { file_path: "n.md" }),
+      ok("r", numbered(1, ["one", "two", ""])),
+   )
+   assert.deepEqual(body(t, env), ["[tool] wrote n.md (2 lines)"])
+})
+
+test("a view already given in an earlier package is not repeated; a changed one is", () => {
+   const { env } = fakeEnv({ "a.md": "one\ntwo\n" })
+   const read = (id: string, lines: string[]) =>
+      trail(call(id, "Read", { file_path: "a.md" }), ok(id, numbered(1, lines)))
+   const first = formatPeerPackage(read("r1", ["one", "two", ""]), env)
+   const memory = JSON.parse(JSON.stringify(first.memory))
+   const again = formatPeerPackage(read("r2", ["one", "two", ""]), env, memory)
+   assert.deepEqual(packageText(again).split("\n\n").slice(1, -1), [])
+   assert.deepEqual(again.interactions[0]?.pointers, ["a.md"])
+   const changed = formatPeerPackage(read("r3", ["one", "TWO", ""]), env, again.memory)
+   assert.match(packageText(changed), /\[tool\] read a\.md L1–3 \(file changed since/)
+})
+
+test("paths under the shared cwd are shown relative to it; others stay absolute", () => {
+   const { env } = fakeEnv({ "C:\\proj\\specs\\a.md": "one\ntwo" })
+   const t = trail(
+      call("r", "Read", { file_path: "C:\\proj\\specs\\a.md" }),
+      ok("r", numbered(1, ["one", "two"])),
+      call("g", "Grep", { pattern: "x", path: "c:/PROJ" }),
+      ok("g", ""),
+      call("b", "Bash", { command: "seq 9999" }),
+      {
+         kind: "result",
+         id: "b",
+         text: "<persisted-output>…",
+         isError: false,
+         saved: { path: "C:\\Users\\u\\.claude\\tool-results\\b.txt" },
+      },
+   )
+   const pkg = formatPeerPackage(t, { ...env, cwd: "C:\\proj\\" })
+   assert.deepEqual(packageText(pkg).split("\n\n").slice(1, -1), [
+      "[tool] read specs\\a.md L1–2",
+      '[tool] Grep {"pattern":"x","path":"."} → no output',
+      '[tool] Bash {"command":"seq 9999"} → saved at C:\\Users\\u\\.claude\\tool-results\\b.txt',
+   ])
+   assert.deepEqual(pkg.interactions[0]?.pointers, ["C:\\proj\\specs\\a.md"])
+})
+
+test("a rewind says which of the peer's turns no longer stand", () => {
+   assert.deepEqual(
+      body(
+         trail(
+            { kind: "rewind", withdrawn: "Rename the module, then\nmore" },
+            { kind: "prompt", text: "Rename it" },
+         ),
+      ),
+      [
+         `[the human rewound the peer's conversation to before the prompt "Rename the module, then…"; the peer's turns from that prompt on were withdrawn and no longer stand]`,
+         "[the human's prompt to the peer]\nRename it",
+      ],
+   )
+   assert.deepEqual(body(trail({ kind: "rewind" })), [
+      "[the human rewound the peer's conversation to an earlier point; the peer's later turns were withdrawn and no longer stand]",
+   ])
 })

@@ -6,6 +6,11 @@ export interface StoreFs {
    writeFileSync(path: string, data: string, options: { flag: "wx" }): void
 }
 
+export interface PeerStoreFs extends StoreFs {
+   /** undefined when unreadable */
+   readText(path: string): string | undefined
+}
+
 export type Hash = (text: string) => string
 
 export function sha256Hex(text: string): string {
@@ -16,14 +21,21 @@ export interface PeerStore {
    put(text: string): string
 }
 
-export function peerStore(root: string, fs: StoreFs, hash: Hash): PeerStore {
+// pointers are replayed in context; 64 bits suffices per session, and a taken name grows
+const SHORT_HASH = 16
+
+export function peerStore(root: string, fs: PeerStoreFs, hash: Hash): PeerStore {
    const dir = `${root}/peer`
    return {
       put(text) {
-         const path = `${dir}/${hash(text)}.txt`
+         const digest = hash(text)
          fs.mkdirSync(dir, { recursive: true })
-         writeOnce(fs, path, text)
-         return path
+         for (let length = SHORT_HASH; ; length *= 2) {
+            const path = `${dir}/${digest.slice(0, length)}.txt`
+            if (writeOnce(fs, path, text) || fs.readText(path) === text) return path
+            if (length >= digest.length)
+               throw new Error(`store: ${path} holds other content`)
+         }
       },
    }
 }
@@ -34,11 +46,13 @@ export function ensureStateDir(root: string, fs: StoreFs): void {
    writeOnce(fs, `${root}/.gitignore`, "*\n")
 }
 
-// exclusive create: whoever wrote this content-addressed path wrote the same bytes
-function writeOnce(fs: StoreFs, path: string, data: string): void {
+/** false when the file already exists */
+function writeOnce(fs: StoreFs, path: string, data: string): boolean {
    try {
       fs.writeFileSync(path, data, { flag: "wx" })
+      return true
    } catch (error) {
       if ((error as { code?: unknown }).code !== "EEXIST") throw error
+      return false
    }
 }
