@@ -14,7 +14,16 @@ export type TrailItem =
         readonly id: string | undefined
         readonly text: string
         readonly isError: boolean
+        /** the harness saved the full output here; `text` may be only a preview */
+        readonly saved?: { readonly path: string; readonly size?: string }
+        /** why `text` shows only part of what was asked for, e.g. a read cut by a token cap */
+        readonly partial?: string
+        /** a subagent's own transcript */
+        readonly transcript?: string
      }
+
+export type TrailResult = Extract<TrailItem, { kind: "result" }>
+export type TrailCall = Extract<TrailItem, { kind: "call" }>
 
 export interface Trail {
    readonly items: readonly TrailItem[]
