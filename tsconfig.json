@@ -10,7 +10,6 @@
       "exactOptionalPropertyTypes": true,
       "noImplicitOverride": true,
       "noFallthroughCasesInSwitch": true,
-      "noPropertyAccessFromIndexSignature": true,
       "allowImportingTsExtensions": true,
       "rewriteRelativeImportExtensions": false,
       "erasableSyntaxOnly": true,
