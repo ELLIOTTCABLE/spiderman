@@ -15,7 +15,7 @@ Hooks run `.ts` files directly, so `node` on your PATH must strip types (Node 22
 
 ## Launch
 
-Two terminals, both in the project you're working on. Start pi first: it writes `.spiderman/peer.json`, which Claude Code's hooks look for.
+Two terminals, both in the project you're working on, started in either order. pi writes `.spiderman/peer.json`, which Claude Code's hooks look for on every prompt.
 
 ```sh
 # B: read-only peer
@@ -24,8 +24,6 @@ pi -e <repo>/src/pi/extension.ts --model openai-codex/gpt-6-astra:high --tools r
 # A: you type here
 claude --plugin-dir <repo>/plugin
 ```
-
-If Claude Code starts first, its first prompt shows a "no peer" notice and Claude misses the one-time note explaining peer blocks. Restart Claude Code (or `/clear`) once pi is up.
 
 ## Using it
 
@@ -46,7 +44,7 @@ If Claude Code starts first, its first prompt shows a "no peer" notice and Claud
 | `--spiderman-stop-wait` | `300` | seconds the Stop hook waits for B's answer |
 | `--spiderman-solo` | `~` | prefix for Claude-only prompts |
 
-Keep the waits under the hook timeouts in `plugin/hooks/hooks.json` (40 s and 420 s). A hook that times out loses its output silently.
+Each hook tells pi how long it can wait (its timeout in `plugin/hooks/hooks.json`, 40 s and 420 s, minus a margin), and pi cuts its waits to fit: a wait flag set beyond the timeout is capped there.
 
 ## Files
 
