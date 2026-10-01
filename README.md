@@ -1,6 +1,6 @@
 # spiderman
 
-You talk to Claude in Claude Code (A). A second model in pi (B) answers every prompt in parallel. Each model gets the other's previous answer with your next prompt, and under each of A's answers you see B's answer, with the paragraphs that only repeat A collapsed to `[n¶ elided]`.
+You talk to Claude in Claude Code (A). A second model in pi (B) answers every prompt in parallel. Each model gets the other's previous answer with your next prompt, and under each of A's answers you see B's answer, with the paragraphs that only repeat A collapsed to one line each, quoting their first words: `[elided: "first eight words…"]`. A paragraph with a number or code that A's answer lacks is never collapsed.
 
 Experimental. The plumbing is meant to be careful; the surface is rough.
 
