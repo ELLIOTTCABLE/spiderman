@@ -188,9 +188,11 @@ human reads A_N + elided B_N, types U_{N+1}
 | 9 | pi restart | new pairing, last-turn backlog | acceptable | 0 |
 | 10 | compaction on either side | deliveries before the boundary count as seen; never re-sent | summary-level | inherent |
 
-- **Open (probe):** at `UserPromptSubmit` time, is the new prompt's user entry (with `parentUuid`) already in CC's transcript? Does CC write a marker on Esc-Esc or `/rewind`?
-  - If neither: at submit, an edited prompt's abandoned A answer still looks live, and can leak into B's package once.
-  - Harmless under "small holes OK"; the Stop-time derivation corrects later deliveries.
+- **Probe (2026-10-01, +SURE):**
+  - At `UserPromptSubmit` the new prompt's user entry is NOT in CC's transcript. CC writes it right after the hooks return (`file-history-snapshot`, then `user{uuid, parentUuid}`).
+  - Esc-Esc and "Restore conversation" write nothing until submit.
+  - pi `/tree` fires `session_before_tree`/`session_tree` with leaf ids and writes nothing to the file; the next message appends under the new leaf.
+  - **Fix:** after answering the submit's hooks, the extension waits (~50 ms polling, ≤3 s cap) for the new user entry, takes its `parentUuid` as the branch point, and only then builds B's package. On timeout it falls back to the tail, logged as `fork-unknown`.
 - **Harness-agnostic shape:** the ledger, sync points, reducer and package builder speak only a neutral side view: ordered live items with stable ids, plus "where are my deliveries".
   - Per-harness adapters supply the view and the delivery mechanism: CC = transcript + hooks; pi = session + extension.
   - Nothing in core may assume which harness is A or B.
