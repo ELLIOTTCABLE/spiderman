@@ -1,0 +1,30 @@
+amends "package://github.com/jdx/hk/releases/download/v1.53.0/hk@1.53.0#/Config.pkl"
+
+default_branch = "ai/main"
+
+// Staged paths only, so the hook stays well under its ~3 s budget; the full lint and typecheck
+// belong to `mise run gate`.
+local linters = new Mapping<String, Step> {
+   ["biome"] {
+      glob = List("*.ts", "*.js", "*.mjs", "*.json", "*.jsonc")
+      check = "biome check --error-on-warnings --no-errors-on-unmatched {{files}}"
+      fix = "biome check --write --no-errors-on-unmatched {{files}}"
+   }
+}
+
+hooks {
+   // Check-only and stash-free: the hook must never rewrite the tree under a running agent, and
+   // the stash stack is shared by every worktree.
+   ["pre-commit"] {
+      fix = false
+      stash = "none"
+      steps = linters
+   }
+   ["fix"] {
+      fix = true
+      steps = linters
+   }
+   ["check"] {
+      steps = linters
+   }
+}

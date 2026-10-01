@@ -1,0 +1,50 @@
+# Pins match versions already installed on the dev machine; nothing here should trigger a download.
+#
+# Tasks run through `cmd /c` on Windows and `sh -c` elsewhere, so a `run` string carries no shell
+# syntax: sequencing is a `run` array, and globs are quoted for node to expand itself.
+#
+# Every task is `raw = true`: agent sessions may export `MISE_TASK_OUTPUT=timed`, whose per-line
+# dwell filter can drop a failing tool's last stdout lines.
+
+[tools]
+# Node 25 strips types natively; the hooks run `.ts` unbuilt under it.
+node = "25.9.0"
+hk = "1.53.0"
+pkl = "0.31.1"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+# Lets hk resolve tools through mise per step, including from the git hook.
+HK_MISE = "1"
+
+[tasks.test]
+description = "Unit tests, full per-test output."
+raw = true
+run = "node --test \"src/**/*.test.ts\""
+
+[tasks.check]
+description = "Typecheck plus lint and format check. Silent-ish on success."
+raw = true
+run = [
+   "tsc --noEmit --project tsconfig.json",
+   "biome check --error-on-warnings .",
+]
+
+[tasks.gate]
+description = "check + test: the completion gate. Terse on success; failures print in full."
+raw = true
+run = [
+   "tsc --noEmit --project tsconfig.json",
+   "biome check --error-on-warnings --reporter=summary .",
+   "node --test --test-reporter=dot \"src/**/*.test.ts\"",
+]
+
+[tasks.fmt]
+description = "Apply formatting and safe lint fixes."
+raw = true
+run = "biome check --write ."
+
+[tasks.hk-install]
+description = "Install the pre-commit hook into this repo's .git/config (shared by every worktree)."
+raw = true
+run = "hk install --mise"

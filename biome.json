@@ -1,0 +1,30 @@
+{
+   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+   "vcs": {
+      "enabled": true,
+      "clientKind": "git",
+      "useIgnoreFile": true
+   },
+   "files": {
+      "includes": ["**", "!**/node_modules", "!.tmp", "!.spiderman", "!.claude"]
+   },
+   "formatter": {
+      "enabled": true,
+      "indentStyle": "space",
+      "indentWidth": 3,
+      "lineWidth": 90,
+      "lineEnding": "lf"
+   },
+   "javascript": {
+      "formatter": {
+         "semicolons": "asNeeded",
+         "trailingCommas": "all"
+      }
+   },
+   "linter": {
+      "enabled": true
+   },
+   "assist": {
+      "enabled": true
+   }
+}

@@ -1,0 +1,24 @@
+{
+   "compilerOptions": {
+      "target": "esnext",
+      "module": "nodenext",
+      "moduleResolution": "nodenext",
+      "lib": ["esnext"],
+      "types": ["node"],
+      "strict": true,
+      "noUncheckedIndexedAccess": true,
+      "exactOptionalPropertyTypes": true,
+      "noImplicitOverride": true,
+      "noFallthroughCasesInSwitch": true,
+      "noPropertyAccessFromIndexSignature": true,
+      "allowImportingTsExtensions": true,
+      "rewriteRelativeImportExtensions": false,
+      "erasableSyntaxOnly": true,
+      "verbatimModuleSyntax": true,
+      "isolatedModules": true,
+      "noEmit": true,
+      "skipLibCheck": true,
+      "forceConsistentCasingInFileNames": true
+   },
+   "include": ["src/**/*.ts", "plugin/**/*.ts"]
+}
