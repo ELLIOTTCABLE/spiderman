@@ -17,6 +17,7 @@ function memoryFs() {
          }
          files.set(path, data)
       },
+      readText: (path) => files.get(path),
    }
    return { fs, files, dirs, writeCount: () => writes }
 }
@@ -74,4 +75,34 @@ test("ensureStateDir writes a self-ignoring .gitignore once", () => {
    ensureStateDir("proj/.spiderman", mem.fs)
    assert.equal(mem.files.get("proj/.spiderman/.gitignore"), "*\n")
    assert.ok(mem.dirs.has("proj/.spiderman"))
+})
+
+test("a stored file is named by the first 16 hex chars of its hash", () => {
+   const mem = memoryFs()
+   const path = peerStore("root", mem.fs, sha256Hex).put("abc")
+   assert.equal(path, "root/peer/ba7816bf8f01cfea.txt")
+})
+
+test("a short name already holding other content grows until it is free", () => {
+   const mem = memoryFs()
+   const sharedPrefix = (text: string) => `${"c".repeat(16)}${text.repeat(48)}`
+   const store = peerStore("root", mem.fs, sharedPrefix)
+   const first = store.put("1")
+   const second = store.put("2")
+   assert.equal(first, `root/peer/${"c".repeat(16)}.txt`)
+   assert.equal(second, `root/peer/${"c".repeat(16)}${"2".repeat(16)}.txt`)
+   assert.equal(mem.files.get(second), "2")
+   assert.equal(store.put("2"), second)
+})
+
+test("other content under the full hash is an error, never an overwrite", () => {
+   const mem = memoryFs()
+   const store = peerStore("root", mem.fs, () => "d".repeat(64))
+   const names = ["first", "second", "third"].map((text) => store.put(text))
+   assert.deepEqual(
+      names.map((name) => name.length - "root/peer/.txt".length),
+      [16, 32, 64],
+   )
+   assert.throws(() => store.put("fourth"), /holds other content/)
+   assert.equal(mem.files.get(`root/peer/${"d".repeat(64)}.txt`), "third")
 })
