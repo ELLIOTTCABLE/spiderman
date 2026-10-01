@@ -1,4 +1,4 @@
-import type { PeerPackage, Segment } from "./package.ts"
+import type { PeerPackage, Segment, SegmentKind } from "./package.ts"
 
 // CC caps each hook string at 10k chars (over: 2k preview + a file the model isn't told to read)
 export const CHUNK_CHARS = 9_500
@@ -14,10 +14,11 @@ export interface ChunkOptions {
 }
 
 // labelled because hooks merge in completion order. Over budget, shrink losing the least first:
-// 1. inline diffs → one-line refs (lossless: diff is in the store)
-// 2. drop tool lines (each only points at a file; prose is the answer)
-// 3. cut prose at the end
-// 2 and 3 end the last chunk with a pointer to the full package
+// 1. inline diffs and subagent reports → one-line refs (lossless: the detail is in the store)
+// 2. drop tool lines (each only points at a file), then report lines
+// 3. drop the interim narration between tool calls; the final answer stays
+// 4. cut the final answer at the end
+// 2–4 end the last chunk with a pointer to the full package
 export function chunkPackage(pkg: PeerPackage, options: ChunkOptions): string[] {
    const { maxChunks, maxChars, fullPath } = options
    const label = (k: number, count: number) => `[peer ${k}/${count}]\n`
@@ -35,30 +36,56 @@ export function chunkPackage(pkg: PeerPackage, options: ChunkOptions): string[] 
    const lossless = pack(compacted, maxChars - labelSize)
    if (fits(lossless)) return labelled(lossless)
 
+   const lastWork = compacted.findLastIndex(
+      (s) => s.kind === "tool" || s.kind === "report",
+   )
+   const stages: ((s: Segment, i: number) => boolean)[] = [
+      (s) => s.kind === "tool",
+      (s) => s.kind === "tool" || s.kind === "report",
+      (s, i) =>
+         s.kind === "tool" || s.kind === "report" || (s.kind === "prose" && i < lastWork),
+   ]
    const budget = maxChars - labelSize - pointer.length - 2
-   const shortened = pack(withoutTools(compacted), budget).slice(0, maxChunks)
+   let shortened: string[] = []
+   for (const drop of stages) {
+      shortened = pack(omitting(compacted, drop), budget)
+      if (fits(shortened)) break
+   }
+   shortened = shortened.slice(0, maxChunks)
    const last = shortened.length - 1
    shortened[last] = `${shortened[last]}\n\n${pointer}`
    return labelled(shortened)
 }
 
-function withoutTools(segments: readonly Segment[]): Segment[] {
+const NOUNS: Partial<Record<SegmentKind, readonly [string, string]>> = {
+   tool: ["tool line", "tool lines"],
+   report: ["subagent report", "subagent reports"],
+   prose: ["paragraph of interim narration", "paragraphs of interim narration"],
+}
+
+function omitting(
+   segments: readonly Segment[],
+   drop: (segment: Segment, index: number) => boolean,
+): Segment[] {
    const kept: Segment[] = []
-   let dropped = 0
+   let run = new Map<SegmentKind, number>()
    const flush = () => {
-      if (dropped === 0) return
-      const noun = dropped === 1 ? "line" : "lines"
-      kept.push({ kind: "frame", text: `[${dropped} tool ${noun} omitted]` })
-      dropped = 0
+      if (run.size === 0) return
+      const parts = [...run].map(([kind, n]) => {
+         const [one, many] = NOUNS[kind] ?? ["segment", "segments"]
+         return `${n} ${n === 1 ? one : many}`
+      })
+      kept.push({ kind: "frame", text: `[${parts.join(", ")} omitted]` })
+      run = new Map()
    }
-   for (const segment of segments) {
-      if (segment.kind === "tool") {
-         dropped++
+   segments.forEach((segment, i) => {
+      if (drop(segment, i)) {
+         run.set(segment.kind, (run.get(segment.kind) ?? 0) + 1)
       } else {
          flush()
          kept.push(segment)
       }
-   }
+   })
    flush()
    return kept
 }

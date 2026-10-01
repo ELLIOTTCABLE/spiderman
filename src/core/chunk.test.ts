@@ -140,3 +140,62 @@ test("prose beyond K chunks is truncated, ending with a pointer to the full file
    )
    assert.doesNotMatch(chunks.join(""), /g{150}/)
 })
+
+const report = (text: string, compact: string): Segment => ({
+   kind: "report",
+   text,
+   compact,
+})
+
+test("over budget, subagent reports compact with the diffs, before anything is dropped", () => {
+   const chunks = chunkPackage(
+      pkg(
+         prose("Kept prose."),
+         report(
+            `[subagent report: scan]\n${"finding\n".repeat(60)}`,
+            "[subagent report: scan] → r.txt",
+         ),
+      ),
+      { maxChunks: 1, maxChars: 200, fullPath },
+   )
+   assert.deepEqual(chunks, [
+      "[peer 1/1]\nKept prose.\n\n[subagent report: scan] → r.txt",
+   ])
+})
+
+test("tool lines go before report lines", () => {
+   const chunks = chunkPackage(
+      pkg(
+         tool(`[tool] Bash ${"x".repeat(150)}`),
+         report("[subagent report: scan]\nshort", "[subagent report: scan] → r.txt"),
+         prose("Answer."),
+      ),
+      { maxChunks: 1, maxChars: 200, fullPath },
+   )
+   const [text] = chunks.map(stripLabel)
+   assert.ok(text?.startsWith("[1 tool line omitted]\n\n[subagent report: scan] → r.txt"))
+})
+
+test("interim narration goes before the final answer is cut", () => {
+   const final = `Final: ${"f".repeat(150)}`
+   const chunks = chunkPackage(
+      pkg(
+         prose(`Looking first. ${"n".repeat(150)}`),
+         tool("[tool] read a.md L1–9"),
+         prose(`Then this. ${"m".repeat(150)}`),
+         tool("[tool] read b.md L1–9"),
+         prose(final),
+      ),
+      { maxChunks: 1, maxChars: 400, fullPath },
+   )
+   assert.equal(chunks.length, 1)
+   assertLabelledAndSized(chunks, 400)
+   assert.equal(
+      stripLabel(chunks[0] ?? ""),
+      [
+         "[2 paragraphs of interim narration, 2 tool lines omitted]",
+         final,
+         `[peer answer shortened to fit; full text at ${fullPath}]`,
+      ].join("\n\n"),
+   )
+})
