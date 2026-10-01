@@ -5,6 +5,7 @@ import {
    bMessage,
    bOutcome,
    displayChunks,
+   emptyLedger,
    lastMessageUuid,
    lastTurnStart,
    reconcileWithLast,
@@ -64,37 +65,45 @@ test("a newly paired B starts from A's last completed turn", () => {
    assert.equal(lastTurnStart(jsonl, "p1"), undefined)
 })
 
-test("what B already has is dropped from later slices", () => {
-   const hash = (t: string) => t
-   const delivered = new Set<string>()
-   const first = withoutDelivered(
-      {
-         items: [
-            { kind: "text", text: "Done." },
-            { kind: "call", id: "c1", name: "Read", input: {} },
-         ],
-         issues: [],
-      },
-      delivered,
-      hash,
+const text = (t: string) => ({ kind: "text" as const, text: t })
+
+test("the Stop-reconciled final text is suppressed once, at its first exact match only", () => {
+   const ledger = { ...emptyLedger, reconciled: "Final answer." }
+   const { trail, ledger: next } = withoutDelivered(
+      { items: [text("Final answer.  "), text("Final answer.")], issues: [] },
+      ledger,
    )
-   assert.equal(first.items.length, 2)
-   const again = withoutDelivered(
+   assert.deepEqual(trail.items, [text("Final answer.")])
+   assert.equal(next.reconciled, undefined)
+})
+
+test("a short sentence repeated verbatim is never suppressed", () => {
+   const once = withoutDelivered({ items: [text("Done.")], issues: [] }, emptyLedger)
+   const twice = withoutDelivered({ items: [text("Done.")], issues: [] }, once.ledger)
+   assert.deepEqual(twice.trail.items, [text("Done.")])
+})
+
+test("calls and results B was sent are suppressed by id; a direct message by one prompt item", () => {
+   const call = { kind: "call" as const, id: "c1", name: "Read", input: {} }
+   const sent = withoutDelivered(
+      { items: [call], issues: [] },
+      { ...emptyLedger, prompts: ["U3b"] },
+   )
+   const later = withoutDelivered(
       {
          items: [
-            { kind: "text", text: "Done.\n" },
+            call,
             { kind: "result", id: "c1", text: "x", isError: false },
-            { kind: "call", id: "c1", name: "Read", input: {} },
-            { kind: "text", text: "New." },
+            { kind: "prompt", text: "U3b" },
+            { kind: "prompt", text: "U3b" },
          ],
          issues: [],
       },
-      delivered,
-      hash,
+      sent.ledger,
    )
-   assert.deepEqual(again.items, [
+   assert.deepEqual(later.trail.items, [
       { kind: "result", id: "c1", text: "x", isError: false },
-      { kind: "text", text: "New." },
+      { kind: "prompt", text: "U3b" },
    ])
 })
 

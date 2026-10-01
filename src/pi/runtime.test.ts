@@ -306,3 +306,21 @@ test("several B answers reaching A at once are sectioned by the prompt each answ
       /\[peer answer 1 of 2, to the human's message "U1"\]\n\nAnswer to one\.\n\n\[peer answer 2 of 2, to the human's message "U2"\]\n\nAnswer to two\./,
    )
 })
+
+test("a short sentence A repeats verbatim in a later turn still reaches B", async () => {
+   const h = harness()
+   h.transcript(userEntry("U1", "p1"))
+   await h.runtime.handle(prompt("U1", "p1"))
+   h.runtime.bStarted()
+   h.runtime.bSettled()
+   h.transcript(aText("Done.", "a1"), userEntry("U2", "p2"))
+   await h.runtime.handle(stop("p1", "Done."))
+   await h.runtime.handle(prompt("U2", "p2"))
+   assert.match(h.sent[1] ?? "", /Done\./)
+   h.runtime.bStarted()
+   h.runtime.bSettled()
+   h.transcript(aText("Done.", "a2"), userEntry("U3", "p3"))
+   await h.runtime.handle(stop("p2", "Done."))
+   await h.runtime.handle(prompt("U3", "p3"))
+   assert.match(h.sent[2] ?? "", /Done\.[\s\S]*\[the human's message\]\nU3$/)
+})

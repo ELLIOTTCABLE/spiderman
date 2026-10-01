@@ -77,42 +77,59 @@ export function lastTurnStart(
    return previous === undefined ? "top" : { uuid: previous.uuid as string }
 }
 
+/** What B already has, so a slice that starts early never repeats it. */
+export interface BLedger {
+   /** calls, results and reports B was sent, by id */
+   readonly ids: ReadonlySet<string>
+   /** human messages sent to B directly; each suppresses one prompt item, once */
+   readonly prompts: readonly string[]
+   /** A's final text, appended from `last_assistant_message` while the transcript lagged */
+   readonly reconciled: string | undefined
+}
+
+export const emptyLedger: BLedger = { ids: new Set(), prompts: [], reconciled: undefined }
+
 /**
- * Drops what B already has: text, prompts, calls and results it was sent before, so a cut that
- * lands early (a lagging transcript at Stop, a queued prompt) never repeats A to B.
+ * Suppresses only what B provably has: ids it was sent, a human message it got directly, and
+ * the one text item a lagging Stop made us send early. Repeated wording is never suppressed:
+ * failures cost reading time, never information.
  */
 export function withoutDelivered(
    trail: Trail,
-   delivered: Set<string>,
-   hash: (text: string) => string,
-): Trail {
-   const key = (item: TrailItem): string | undefined => {
-      switch (item.kind) {
-         case "text":
-            return `t:${hash(item.text.trim())}`
-         case "prompt":
-            return `p:${hash(item.text.trim())}`
-         case "call":
-            return item.id === undefined ? undefined : `c:${item.id}`
-         case "result":
-            return item.id === undefined ? undefined : `r:${item.id}`
-         case "report":
-            return `R:${item.id ?? hash(item.text)}`
-         default:
-            return undefined
+   ledger: BLedger,
+): { readonly trail: Trail; readonly ledger: BLedger } {
+   const ids = new Set(ledger.ids)
+   const prompts = [...ledger.prompts]
+   let reconciled = ledger.reconciled?.trimEnd()
+   const idOf = (item: TrailItem) =>
+      item.kind === "call" || item.kind === "result" || item.kind === "report"
+         ? item.id === undefined
+            ? undefined
+            : `${item.kind}:${item.id}`
+         : undefined
+   const items = trail.items.filter((item) => {
+      if (
+         item.kind === "text" &&
+         reconciled !== undefined &&
+         item.text.trimEnd() === reconciled
+      ) {
+         reconciled = undefined
+         return false
       }
-   }
-   const keys = trail.items.map(key)
-   const items = trail.items.filter((_, i) => {
-      const k = keys[i]
-      return k === undefined || !delivered.has(k)
+      if (item.kind === "prompt") {
+         const at = prompts.indexOf(item.text.trim())
+         if (at !== -1) {
+            prompts.splice(at, 1)
+            return false
+         }
+      }
+      const id = idOf(item)
+      if (id === undefined) return true
+      if (ids.has(id)) return false
+      ids.add(id)
+      return true
    })
-   for (const k of keys) if (k !== undefined) delivered.add(k)
-   return { ...trail, items }
-}
-
-export function promptKey(prompt: string, hash: (text: string) => string): string {
-   return `p:${hash(prompt.trim())}`
+   return { trail: { ...trail, items }, ledger: { ids, prompts, reconciled: undefined } }
 }
 
 /** Several B answers in one delivery: one package, a short heading per answered prompt. */

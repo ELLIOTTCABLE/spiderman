@@ -1,14 +1,15 @@
 import { isAbsolute, join } from "node:path"
 import { type AnchorParse, parseAnchors } from "../core/anchors.ts"
 import {
+   type BLedger,
    bAnswerText,
    bMessage,
    bOutcome,
    dedupeKey,
    displayChunks,
+   emptyLedger,
    lastMessageUuid,
    lastTurnStart,
-   promptKey,
    reconcileWithLast,
    sectioned,
    withoutDelivered,
@@ -102,7 +103,7 @@ export class Runtime {
    #toA: PackageMemory | undefined
    #toB: PackageMemory | undefined
    /** keys of A's trail items and the human messages B already has */
-   #deliveredToB = new Set<string>()
+   #bLedger: BLedger = emptyLedger
    #bRunning: { turn: number; started: boolean } | undefined
    #cancelWake: (() => void) | undefined
    #nextId = 0
@@ -360,13 +361,13 @@ export class Runtime {
    }
 
    #startB(effect: Extract<TurnEffect, { type: "startB" }>) {
-      const { fs, b, config, hash } = this.#deps
+      const { fs, b, config } = this.#deps
       const transcriptPath = this.#aTranscript
       const transcript =
          transcriptPath === undefined ? undefined : fs.readText(transcriptPath)
       const until = effect.until === "end" ? undefined : effect.until
       // committed only once B accepts the message: a refused start is retried from the same place
-      const delivered = new Set(this.#deliveredToB)
+      let ledger = this.#bLedger
       let toB = this.#toB
       let cut: Cursor | undefined = this.#aCut ?? until
       let aPackage: string | undefined
@@ -387,7 +388,12 @@ export class Runtime {
                until === undefined
                   ? reconcileWithLast(sliced, effect.lastAssistantMessage)
                   : sliced
-            const trail = withoutDelivered(whole, delivered, hash)
+            const fresh = withoutDelivered(whole, ledger)
+            const trail = fresh.trail
+            const appended = whole.items.length > sliced.items.length
+            ledger = appended
+               ? { ...fresh.ledger, reconciled: effect.lastAssistantMessage }
+               : fresh.ledger
             if (trail.issues.length > 0) {
                this.#deps.log({
                   what: "aTrailIssues",
@@ -404,7 +410,10 @@ export class Runtime {
          const uuid = lastMessageUuid(transcript)
          cut = until ?? (uuid === undefined ? cut : { uuid })
       }
-      for (const prompt of effect.prompts) delivered.add(promptKey(prompt, hash))
+      ledger = {
+         ...ledger,
+         prompts: [...ledger.prompts, ...effect.prompts.map((p) => p.trim())],
+      }
 
       const leaf = b.leafId()
       const sent = b.send(bMessage(aPackage, effect.prompts))
@@ -423,7 +432,7 @@ export class Runtime {
       }
       this.#aCut = cut
       this.#toB = toB
-      this.#deliveredToB = delivered
+      this.#bLedger = ledger
       this.#turns.set(effect.turn, { leaf, prompts: effect.prompts })
       this.#bRunning = { turn: effect.turn, started: false }
       this.#deps.setTimer(config.startTimeoutMs, () => {
