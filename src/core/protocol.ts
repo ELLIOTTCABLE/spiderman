@@ -119,3 +119,8 @@ export function bearerMatches(header: string | undefined, token: string): boolea
    const expected = Buffer.from(`Bearer ${token}`)
    return given.length === expected.length && timingSafeEqual(given, expected)
 }
+
+declare const packageMemoryBrand: unique symbol
+/** Cross-turn package state (e.g. files the receiver was already pointed at). Opaque here;
+ * the package builder owns its shape. One per direction, A→B and B→A. */
+export type PackageMemory = { readonly [packageMemoryBrand]: true }
