@@ -15,7 +15,6 @@ import { formatPeerPackage, type PackageEnv, packageText } from "../core/package
 import { piTrail } from "../core/pi-trail.ts"
 import { type HookReply, type HookRequest, STATE_DIR } from "../core/protocol.ts"
 import { renderElided } from "../core/render.ts"
-import { STANDING_FOR_A } from "../core/standing.ts"
 import { peerStore, type StoreFs } from "../core/store.ts"
 import {
    type BOutcome,
@@ -153,6 +152,7 @@ export class Runtime {
                prompt: request.prompt,
                ...(request.promptId === undefined ? {} : { promptId: request.promptId }),
                ...(request.source === undefined ? {} : { source: request.source }),
+               ...(request.budgetMs === undefined ? {} : { budgetMs: request.budgetMs }),
             }
          case "stop":
             return {
@@ -170,6 +170,7 @@ export class Runtime {
                ...(request.lastAssistantMessage === undefined
                   ? {}
                   : { lastAssistantMessage: request.lastAssistantMessage }),
+               ...(request.budgetMs === undefined ? {} : { budgetMs: request.budgetMs }),
             }
       }
    }
@@ -250,8 +251,6 @@ export class Runtime {
       switch (reply.kind) {
          case "empty":
             return {}
-         case "standing":
-            return { additionalContext: STANDING_FOR_A }
          case "deliver": {
             const chunk = this.#deliverChunks(reply.turns, part.count)[part.index - 1]
             return chunk === undefined ? {} : { additionalContext: chunk }

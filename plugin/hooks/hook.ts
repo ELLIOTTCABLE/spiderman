@@ -4,7 +4,9 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
+   HOOK_MARGIN_MS,
    HOOK_PATH,
+   HOOKS,
    type HookEvent,
    type HookRequest,
    hookOutput,
@@ -16,19 +18,15 @@ import {
    stopInput,
    userPromptSubmitInput,
 } from "../../src/core/protocol.ts"
+import { STANDING_FOR_A } from "../../src/core/standing.ts"
 import { ensureStateDir } from "../../src/core/store.ts"
 import { validate } from "../../src/core/validate.ts"
 
-// each a few seconds under its `timeout` in hooks.json, so the hook answers before CC kills it
-const DEADLINE_MS: Record<HookEvent, number> = {
-   SessionStart: 12_000,
-   UserPromptSubmit: 37_000,
-   Stop: 415_000,
-}
 const NO_PEER_EVERY_MS = 10 * 60_000
 const NO_PEER =
    "spiderman: no peer is running for this project (start pi with the spiderman extension); prompts go to Claude alone."
 
+const started = Date.now()
 const [eventArg, indexArg, countArg] = process.argv.slice(2)
 
 main()
@@ -40,13 +38,22 @@ main()
 
 async function main(): Promise<Record<string, unknown>> {
    const event = parseEvent(eventArg)
+   if (event === undefined) return {}
+   // static, so they reach Claude whether or not pi is up yet: start order doesn't matter
+   const standing =
+      event === "SessionStart"
+         ? hookOutput(event, { additionalContext: STANDING_FOR_A })
+         : {}
+   return { ...standing, ...(await exchange(event).catch(() => ({}))) }
+}
+
+async function exchange(event: HookEvent): Promise<Record<string, unknown>> {
    const index = Number(indexArg ?? 1)
    const count = Number(countArg ?? 1)
-   if (event === undefined || !(index >= 1 && index <= count)) return {}
-   const part = { index, count }
+   if (!(index >= 1 && index <= count)) return {}
 
    const input: unknown = JSON.parse(await readStdin())
-   const request = toRequest(event, input, part)
+   const request = toRequest(event, input, { index, count })
    if (request === undefined) return {}
 
    const projectDir = process.env.CLAUDE_PROJECT_DIR || request.cwd
@@ -54,6 +61,13 @@ async function main(): Promise<Record<string, unknown>> {
    const peer = readPeer(stateDir)
    if (peer === undefined) return noPeer(event, index, stateDir)
 
+   // the server clamps its waits to this, so hooks.json and pi's flags can't drift apart
+   const budgetMs = Math.max(
+      0,
+      HOOKS[event].timeoutS * 1_000 - HOOK_MARGIN_MS - (Date.now() - started),
+   )
+   const body =
+      request.body.kind === "session-start" ? request.body : { ...request.body, budgetMs }
    try {
       const res = await fetch(`http://127.0.0.1:${peer.port}${HOOK_PATH}`, {
          method: "POST",
@@ -61,8 +75,8 @@ async function main(): Promise<Record<string, unknown>> {
             authorization: `Bearer ${peer.token}`,
             "content-type": "application/json",
          },
-         body: JSON.stringify(request.body),
-         signal: AbortSignal.timeout(DEADLINE_MS[event]),
+         body: JSON.stringify(body),
+         signal: AbortSignal.timeout(budgetMs),
       })
       const reply = validate(hookReply, await res.json())
       return reply.ok ? hookOutput(event, reply.value) : {}

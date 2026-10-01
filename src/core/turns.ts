@@ -1,3 +1,6 @@
+import { isHumanPrompt } from "./human.ts"
+import { MEDIATOR_TIMEOUT_MS } from "./mediator.ts"
+
 /**
  * The turn state machine (ledger: "Turn state machine"), as a pure reducer. The pi extension
  * performs the effects: answering hook requests, starting B's turns, timers.
@@ -13,6 +16,9 @@ export interface TurnConfig {
    /** how long a resolved request group answers its late duplicates */
    readonly dedupeWindowMs: number
    readonly retryMs: number
+   /** kept clear of a hook's budget for work after a wait: chunk release; elision */
+   readonly submitReserveMs: number
+   readonly stopReserveMs: number
 }
 
 export const defaultTurnConfig: TurnConfig = {
@@ -21,6 +27,8 @@ export const defaultTurnConfig: TurnConfig = {
    stopWaitMs: 300_000,
    dedupeWindowMs: 60_000,
    retryMs: 2_000,
+   submitReserveMs: 1_500,
+   stopReserveMs: MEDIATOR_TIMEOUT_MS + 5_000,
 }
 
 export interface Part {
@@ -45,6 +53,8 @@ export type TurnEvent =
         readonly prompt: string
         readonly promptId?: string
         readonly source?: string
+        /** how long the hook can still wait for its answer */
+        readonly budgetMs?: number
      }
    | {
         readonly type: "stop"
@@ -54,6 +64,7 @@ export type TurnEvent =
         readonly key: string
         readonly promptId?: string
         readonly lastAssistantMessage?: string
+        readonly budgetMs?: number
      }
    | { readonly type: "bSettled"; readonly turn: number; readonly outcome: BOutcome }
    /** starting B's turn failed (e.g. compaction in flight, model guard); its prompts go back */
@@ -63,7 +74,6 @@ export type TurnEvent =
 export type BOutcome = "completed" | "error" | "aborted"
 
 export type Reply =
-   | { readonly kind: "standing" }
    /** B's answers for A, as context */
    | { readonly kind: "deliver"; readonly turns: readonly number[] }
    /** one B answer, elided, for the human */
@@ -161,9 +171,6 @@ const PEER_SLOW =
    "spiderman: the peer is still answering; its answer reaches Claude with your next prompt."
 const MAX_TIMER_RETRIES = 5
 
-// non-human turns: task notifications, auto-continuation, wake-ups
-const HUMAN_SOURCES = new Set(["user", "sdk"])
-
 export function step(
    state: TurnState,
    event: TurnEvent,
@@ -225,7 +232,7 @@ class Machine {
          this.state = { ...this.state, pairedSession: event.ccSessionId }
          this.#respond(
             { requestId: event.requestId, part: { index: 1, count: 1 } },
-            { kind: "standing" },
+            { kind: "empty" },
          )
       } else {
          this.#respond(
@@ -280,9 +287,7 @@ class Machine {
          event.promptId !== undefined && event.promptId !== this.state.aPromptId
       // a fresh prompt_id while "running" means A was interrupted (no Stop) and is idle again
       const aIdle = !this.state.aRunning || fresh
-      const human =
-         (event.source === undefined || HUMAN_SOURCES.has(event.source)) &&
-         !event.prompt.trimStart().startsWith("<task-notification>")
+      const human = isHumanPrompt(event.prompt, event.source)
       const solo = event.prompt.startsWith(this.#config.soloPrefix)
       this.#log("submit", { aIdle, human, solo })
 
@@ -306,7 +311,14 @@ class Machine {
       const running = this.state.bRunning
       if (aIdle && running !== undefined && !this.#turn(running)?.settled) {
          return {
-            waitFor: { turn: running, deadline: this.#now + this.#config.promptWaitMs },
+            waitFor: {
+               turn: running,
+               deadline: this.#deadline(
+                  this.#config.promptWaitMs,
+                  event.budgetMs,
+                  this.#config.submitReserveMs,
+               ),
+            },
          }
       }
       return { answer: { reply: this.#deliverUndelivered(), at: this.#now } }
@@ -328,7 +340,14 @@ class Machine {
       if (candidate.settled)
          return { answer: { reply: this.#display(candidate.turn), at: this.#now } }
       return {
-         waitFor: { turn: candidate.turn, deadline: this.#now + this.#config.stopWaitMs },
+         waitFor: {
+            turn: candidate.turn,
+            deadline: this.#deadline(
+               this.#config.stopWaitMs,
+               event.budgetMs,
+               this.#config.stopReserveMs,
+            ),
+         },
       }
    }
 
@@ -429,6 +448,13 @@ class Machine {
       }
       if (deadlines.length > 0)
          this.effects.push({ type: "wake", at: Math.min(...deadlines) })
+   }
+
+   /** The configured wait, cut short so the hook still gets its answer within its budget. */
+   #deadline(wait: number, budget: number | undefined, reserve: number): number {
+      const room =
+         budget === undefined ? wait : Math.max(0, Math.min(wait, budget - reserve))
+      return this.#now + room
    }
 
    #deliverUndelivered(): Reply {

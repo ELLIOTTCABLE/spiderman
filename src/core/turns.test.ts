@@ -86,7 +86,7 @@ test("common case: B starts at submit; Stop shows B's answer; the next submit de
             source: "startup",
          }),
       ),
-      [{ reply: { kind: "standing" }, notice: undefined }],
+      [{ reply: { kind: "empty" }, notice: undefined }],
    )
    const first = sim.send(submit("U1", "p1"), 10)
    assert.deepEqual(replies(first), [{ reply: { kind: "empty" }, notice: undefined }])
@@ -339,4 +339,25 @@ test("notices only ever ride on part 1", () => {
       ...(submit("U", "p", { ccSessionId: "cc2" }, 2) as object),
    } as TurnEvent)
    assert.deepEqual(replies(effects), [{ reply: { kind: "empty" }, notice: undefined }])
+})
+
+test("waits never outlast the hook's own budget, whatever the configured caps", () => {
+   const sim = new Sim()
+   sim.send(submit("U1", "p1"), 0)
+   const waiting = sim.send(submit("U2", "p2", { budgetMs: 2_000 }), 100)
+   assert.deepEqual(
+      waiting.filter((e) => e.type === "wake"),
+      [{ type: "wake", at: 100 + 2_000 - config.submitReserveMs }],
+   )
+
+   const display = new Sim()
+   display.send(submit("U1", "p1"), 0)
+   const stopping = display.send(
+      { ...(stop("p1") as object), budgetMs: config.stopReserveMs + 1_000 } as TurnEvent,
+      10,
+   )
+   assert.deepEqual(
+      stopping.filter((e) => e.type === "wake"),
+      [{ type: "wake", at: 1_010 }],
+   )
 })

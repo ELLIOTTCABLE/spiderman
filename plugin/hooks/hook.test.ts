@@ -1,11 +1,12 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
-import type { HookReply, HookRequest } from "../../src/core/protocol.ts"
+import { HOOKS, type HookReply, type HookRequest } from "../../src/core/protocol.ts"
+import { STANDING_FOR_A } from "../../src/core/standing.ts"
 import { startHookServer } from "../../src/pi/server.ts"
 
 const script = fileURLToPath(new URL("./hook.ts", import.meta.url))
@@ -82,7 +83,12 @@ test("a prompt hook forwards its part and prints the context as hook JSON", asyn
             additionalContext: "[peer 2/4] …",
          },
       })
-      assert.deepEqual(seen[0], {
+      const { budgetMs, ...forwarded } = seen[0] as HookRequest & { budgetMs?: number }
+      assert.ok(
+         budgetMs !== undefined && budgetMs > 30_000 && budgetMs <= 37_000,
+         String(budgetMs),
+      )
+      assert.deepEqual(forwarded, {
          kind: "prompt",
          ccSessionId: "cc",
          prompt: "hi",
@@ -136,5 +142,45 @@ test("garbage on stdin is ignored, not an error", async () => {
       assert.deepEqual(JSON.parse(out.stdout), {})
    } finally {
       rmSync(dir, { recursive: true, force: true })
+   }
+})
+
+test("SessionStart gives Claude the standing instructions even with no peer running", async () => {
+   const dir = mkdtempSync(join(tmpdir(), "spiderman-hook-"))
+   try {
+      const out = await runHook(
+         ["SessionStart", "1", "1"],
+         input(dir, { hook_event_name: "SessionStart", source: "startup" }),
+         dir,
+      )
+      const printed = JSON.parse(out.stdout)
+      assert.deepEqual(printed.hookSpecificOutput, {
+         hookEventName: "SessionStart",
+         additionalContext: STANDING_FOR_A,
+      })
+   } finally {
+      rmSync(dir, { recursive: true, force: true })
+   }
+})
+
+test("hooks.json registers exactly the parts and timeouts the hook script budgets for", () => {
+   const config = JSON.parse(
+      readFileSync(new URL("./hooks.json", import.meta.url), "utf8"),
+   )
+   for (const [event, { parts, timeoutS }] of Object.entries(HOOKS)) {
+      const hooks = config.hooks[event].flatMap(
+         (group: { hooks: unknown[] }) => group.hooks,
+      )
+      assert.deepEqual(
+         hooks.map((h: { args: string[]; timeout: number }) => [
+            h.args.slice(1),
+            h.timeout,
+         ]),
+         Array.from({ length: parts }, (_, i) => [
+            [event, String(i + 1), String(parts)],
+            timeoutS,
+         ]),
+         event,
+      )
    }
 })

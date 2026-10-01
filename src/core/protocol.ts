@@ -15,6 +15,15 @@ export const STATE_DIR = ".spiderman"
 export const PEER_FILE = "peer.json"
 export const HOOK_PATH = "/v1/hook"
 
+/** One source for hooks.json (a test holds them equal) and for each hook's own deadline. */
+export const HOOKS = {
+   SessionStart: { parts: 1, timeoutS: 15 },
+   UserPromptSubmit: { parts: 4, timeoutS: 40 },
+   Stop: { parts: 2, timeoutS: 420 },
+} as const
+/** a hook answers this long before CC would kill it */
+export const HOOK_MARGIN_MS = 3_000
+
 const hookCommon = {
    session_id: string,
    transcript_path: string,
@@ -81,6 +90,7 @@ export const hookRequest = tagged("kind", {
       transcriptPath: string,
       cwd: string,
       part,
+      budgetMs: optional(integer),
    }),
    stop: object({
       ccSessionId: string,
@@ -88,6 +98,7 @@ export const hookRequest = tagged("kind", {
       lastAssistantMessage: optional(string),
       transcriptPath: string,
       part,
+      budgetMs: optional(integer),
    }),
 })
 export type HookRequest = ReturnType<typeof hookRequest>

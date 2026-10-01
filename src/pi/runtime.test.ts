@@ -1,7 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { HookRequest } from "../core/protocol.ts"
-import { STANDING_FOR_A } from "../core/standing.ts"
 import { defaultTurnConfig } from "../core/turns.ts"
 import { type BSide, Runtime, type RuntimeDeps, type RuntimeFs } from "./runtime.ts"
 
@@ -121,9 +120,7 @@ test("a full turn: standing context, B in parallel, elided display, then deliver
    })
    assert.deepEqual(
       await h.runtime.handle({ kind: "session-start", ...base, source: "startup" }),
-      {
-         additionalContext: STANDING_FOR_A,
-      },
+      {},
    )
 
    h.transcript(userEntry("U1", "p1"))

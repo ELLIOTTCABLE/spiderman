@@ -10,3 +10,6 @@ Output only JSON: {"elide": ["<the first eight words of each redundant paragraph
 export function mediatorInput(aText: string, bText: string): string {
    return `<answer_a>\n${aText}\n</answer_a>\n\n<answer_b>\n${bText}\n</answer_b>`
 }
+
+/** the mediator call is abandoned after this; elision then falls back to showing B in full */
+export const MEDIATOR_TIMEOUT_MS = 90_000

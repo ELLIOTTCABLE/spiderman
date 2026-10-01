@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { test } from "node:test"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { HOOK_PATH, type HookReply } from "../core/protocol.ts"
-import { STANDING_FOR_A, STANDING_FOR_B } from "../core/standing.ts"
+import { STANDING_FOR_B } from "../core/standing.ts"
 import spiderman from "./extension.ts"
 
 type Handler = (event: unknown, ctx: unknown) => unknown
@@ -65,9 +65,7 @@ test("the extension pairs, relays a turn, and cleans up after itself", async () 
       const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
       assert.deepEqual(
          await post(cwd, { kind: "session-start", source: "startup", ...common }),
-         {
-            additionalContext: STANDING_FOR_A,
-         },
+         {},
       )
 
       await post(cwd, {

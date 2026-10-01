@@ -9,7 +9,11 @@ import {
 } from "node:fs"
 import { dirname } from "node:path"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
-import { MEDIATOR_SYSTEM_PROMPT, mediatorInput } from "../core/mediator.ts"
+import {
+   MEDIATOR_SYSTEM_PROMPT,
+   MEDIATOR_TIMEOUT_MS,
+   mediatorInput,
+} from "../core/mediator.ts"
 import { STATE_DIR } from "../core/protocol.ts"
 import { STANDING_FOR_B } from "../core/standing.ts"
 import { sha256Hex } from "../core/store.ts"
@@ -248,7 +252,7 @@ function mediator(
                },
             ],
          },
-         { signal: AbortSignal.timeout(90_000) },
+         { signal: AbortSignal.timeout(MEDIATOR_TIMEOUT_MS) },
       )
       log({
          what: "mediator",
