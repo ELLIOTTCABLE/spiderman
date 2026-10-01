@@ -1,31 +1,55 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { formatPeerPackage, packageText } from "./package.ts"
+import { formatPeerPackage, type PackageEnv, packageText } from "./package.ts"
 import type { Trail, TrailItem } from "./trail.ts"
 
-function fakeStore() {
+function fakeEnv(files: Record<string, string> = {}) {
    const stored = new Map<string, string>()
-   const put = (text: string) => {
-      const existing = stored.get(text)
-      if (existing !== undefined) return existing
-      const path = `peer/${stored.size + 1}.txt`
-      stored.set(text, path)
-      return path
+   const env: PackageEnv = {
+      refer(text) {
+         for (const [path, existing] of stored) if (existing === text) return path
+         const path = `peer/${stored.size + 1}.txt`
+         stored.set(path, text)
+         return path
+      },
+      readFile: (path) => files[path],
    }
-   return { put, stored }
+   return { env, stored }
 }
 
 function trail(...items: TrailItem[]): Trail {
    return { items, issues: [] }
 }
 
-function body(text: string): string[] {
-   return text.split("\n\n").slice(1, -1)
+/** The segments between the opening frame and the end marker. */
+function body(t: Trail, env: PackageEnv = fakeEnv().env): string[] {
+   return packageText(formatPeerPackage(t, env)).split("\n\n").slice(1, -1)
 }
+
+const call = (id: string, name: string, input: unknown): TrailItem => ({
+   kind: "call",
+   id,
+   name,
+   input,
+})
+const ok = (id: string, text: string): TrailItem => ({
+   kind: "result",
+   id,
+   text,
+   isError: false,
+})
+const fail = (id: string, text: string): TrailItem => ({
+   kind: "result",
+   id,
+   text,
+   isError: true,
+})
+const numbered = (start: number, lines: string[]) =>
+   lines.map((line, i) => `${start + i}\t${line}`).join("\n")
 
 test("the frame is factual, anonymous, and says the human has not endorsed it", () => {
    const text = packageText(
-      formatPeerPackage(trail({ kind: "text", text: "Hi." }), fakeStore().put),
+      formatPeerPackage(trail({ kind: "text", text: "Hi." }), fakeEnv().env),
    )
    const [first] = text.split("\n")
    assert.ok(first)
@@ -36,216 +60,340 @@ test("the frame is factual, anonymous, and says the human has not endorsed it", 
    assert.match(text, /\[end of peer answer\]$/)
 })
 
-test("text and tool calls stay interleaved, with outputs referenced by path", () => {
-   const store = fakeStore()
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            { kind: "text", text: "Let me look." },
-            { kind: "call", id: "c1", name: "Read", input: { file_path: "src/a.ts" } },
-            {
-               kind: "result",
-               id: "c1",
-               text: "line 1\nline 2\nline 3\n",
-               isError: false,
-            },
-            { kind: "text", text: "It reads three lines." },
-         ),
-         store.put,
-      ),
+test("a read of an unchanged file is one line with no content", () => {
+   const { env, stored } = fakeEnv({ "a.ts": "one\ntwo\nthree\n" })
+   const t = trail(
+      call("r", "Read", { file_path: "a.ts" }),
+      ok("r", numbered(1, ["one", "two", "three", ""])),
    )
-   assert.deepEqual(body(text), [
-      "Let me look.",
-      '[tool] Read {"file_path":"src/a.ts"} → output peer/1.txt (3 lines)',
-      "It reads three lines.",
-   ])
-   assert.equal(store.stored.get("line 1\nline 2\nline 3\n"), "peer/1.txt")
+   assert.deepEqual(body(t, env), ["[tool] read a.ts L1–4"])
+   assert.equal(stored.size, 0)
 })
 
-test("parallel calls pair with their results by id, not by position", () => {
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            { kind: "call", id: "a", name: "Grep", input: { pattern: "x" } },
-            { kind: "call", id: "b", name: "Glob", input: { pattern: "*.ts" } },
-            { kind: "result", id: "b", text: "b.ts", isError: false },
-            { kind: "result", id: "a", text: "", isError: false },
-         ),
-         fakeStore().put,
-      ),
+test("a read of a file that has changed since stores the peer's view", () => {
+   const { env, stored } = fakeEnv({ "a.ts": "one\nTWO\n" })
+   const t = trail(
+      call("r", "Read", { file_path: "a.ts", offset: 2, limit: 1 }),
+      ok("r", numbered(2, ["two"])),
    )
-   assert.deepEqual(body(text), [
-      '[tool] Grep {"pattern":"x"} → no output',
-      '[tool] Glob {"pattern":"*.ts"} → output peer/1.txt (1 line)',
+   assert.deepEqual(body(t, env), [
+      "[tool] read a.ts L2–2 (file changed since; peer's view: peer/1.txt)",
+   ])
+   assert.equal(stored.get("peer/1.txt"), "two")
+})
+
+test("a read of a file that is gone also stores the peer's view", () => {
+   const { env } = fakeEnv()
+   const t = trail(call("r", "read", { path: "gone.md", offset: null }), ok("r", "x\ny"))
+   assert.deepEqual(body(t, env), [
+      "[tool] read gone.md L1–2 (file changed since; peer's view: peer/1.txt)",
    ])
 })
 
-test("errors, missing results, and orphan results are all stated", () => {
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            { kind: "call", id: "a", name: "Bash", input: { command: "false" } },
-            { kind: "result", id: "a", text: "exit 1", isError: true },
-            { kind: "call", id: "b", name: "Bash", input: { command: "sleep 99" } },
-            { kind: "result", id: "zzz", text: "stray", isError: false },
-         ),
-         fakeStore().put,
-      ),
+test("a read cut short says how, so the receiver knows the peer never saw the rest", () => {
+   const { env } = fakeEnv({ "big.log": "a\nb\nc\nd\n" })
+   const cc: TrailItem = {
+      kind: "result",
+      id: "r",
+      text: numbered(1, ["a", "b"]),
+      isError: false,
+      partial: "cut by token cap; 2501 lines in file",
+   }
+   assert.deepEqual(body(trail(call("r", "Read", { file_path: "big.log" }), cc), env), [
+      "[tool] read big.log L1–2 (cut by token cap; 2501 lines in file)",
+   ])
+   const pi = ok(
+      "p",
+      "a\nb\n\n[Showing lines 1-2 of 2501 (50.0KB limit). Use offset=3 to continue.]",
    )
-   assert.deepEqual(body(text), [
-      '[tool] Bash {"command":"false"} → error output peer/1.txt (1 line)',
-      '[tool] Bash {"command":"sleep 99"} → no result recorded',
-      "[tool output] peer/2.txt (1 line)",
+   assert.deepEqual(body(trail(call("p", "read", { path: "big.log" }), pi), env), [
+      "[tool] read big.log L1–2 (2501 lines in file)",
    ])
 })
 
-test("a Claude Code Edit renders inline as a compact diff", () => {
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            {
-               kind: "call",
-               id: "e",
-               name: "Edit",
-               input: { file_path: "src/a.ts", old_string: "a\nb", new_string: "a\nc" },
-            },
-            { kind: "result", id: "e", text: "The file was updated.", isError: false },
-         ),
-         fakeStore().put,
-      ),
+test("repeated reads collapse: same range is 'again', a covered range disappears", () => {
+   const { env } = fakeEnv({ "a.ts": "1\n2\n3\n4\n" })
+   const t = trail(
+      call("a", "Read", { file_path: "a.ts" }),
+      ok("a", numbered(1, ["1", "2", "3", "4", ""])),
+      call("b", "Read", { file_path: "a.ts" }),
+      ok("b", numbered(1, ["1", "2", "3", "4", ""])),
+      call("c", "Read", { file_path: "a.ts", offset: 2, limit: 2 }),
+      ok("c", numbered(2, ["2", "3"])),
    )
-   assert.match(text, /\[tool\] Edit src\/a\.ts\n```diff\n-a\n-b\n\+a\n\+c\n```/)
+   assert.deepEqual(body(t, env), [
+      "[tool] read a.ts L1–5",
+      "[tool] read a.ts L1–5 (again)",
+   ])
+})
+
+test("a re-read after the peer's own edit is a new read, not a repeat", () => {
+   const { env } = fakeEnv({ "a.ts": "new\n" })
+   const t = trail(
+      call("a", "Read", { file_path: "a.ts" }),
+      ok("a", numbered(1, ["old", ""])),
+      call("b", "Read", { file_path: "a.ts" }),
+      ok("b", numbered(1, ["new", ""])),
+   )
+   const lines = body(t, env)
+   assert.match(lines[0] ?? "", /changed since/)
+   assert.equal(lines[1], "[tool] read a.ts L1–2")
+})
+
+test("an unparseable read result falls back to plain output handling", () => {
+   const t = trail(call("r", "Read", { file_path: "img.png" }), ok("r", "[image]"))
+   assert.deepEqual(body(t), ['[tool] Read {"file_path":"img.png"} → [image]'])
+})
+
+test("tiny search output is inline; larger output is a pointer with a size", () => {
+   const { env, stored } = fakeEnv()
+   const big = Array.from({ length: 412 }, (_, i) => `line ${i}`).join("\n")
+   const t = trail(
+      call("a", "Glob", { pattern: "*.md" }),
+      ok("a", "inventory.md"),
+      call("b", "Grep", { pattern: "heron" }),
+      ok("b", "Found 2 files\ninventory.md\nnotes.txt"),
+      call("c", "bash", { command: "seq 412", timeout: null }),
+      ok("c", big),
+   )
+   assert.deepEqual(body(t, env), [
+      '[tool] Glob {"pattern":"*.md"} → inventory.md',
+      '[tool] Grep {"pattern":"heron"} →\n  Found 2 files\n  inventory.md\n  notes.txt',
+      '[tool] bash {"command":"seq 412"} → 412 lines, peer/1.txt',
+   ])
+   assert.equal(stored.get("peer/1.txt"), big)
+})
+
+test("identical outputs share one stored file", () => {
+   const { env, stored } = fakeEnv()
+   const big = "x\n".repeat(50)
+   body(
+      trail(
+         call("a", "Bash", { command: "a" }),
+         ok("a", big),
+         call("b", "Bash", { command: "b" }),
+         ok("b", big),
+      ),
+      env,
+   )
+   assert.equal(stored.size, 1)
+})
+
+test("output the harness already saved is pointed at, not copied", () => {
+   const { env, stored } = fakeEnv()
+   const t = trail(call("a", "Bash", { command: "seq 1 5000" }), {
+      kind: "result",
+      id: "a",
+      text: "<persisted-output>\nOutput too large (223.5KB). Full output saved to: C:/x/tool-results/b.txt\n…",
+      isError: false,
+      saved: { path: "C:/x/tool-results/b.txt", size: "223.5KB" },
+   })
+   assert.deepEqual(body(t, env), [
+      '[tool] Bash {"command":"seq 1 5000"} → 223.5KB, saved at C:/x/tool-results/b.txt',
+   ])
+   assert.equal(stored.size, 0)
+})
+
+test("errors are a one-line marker, with a pointer only when there is more", () => {
+   const { env } = fakeEnv()
+   const t = trail(
+      call("a", "Read", { file_path: "missing.txt" }),
+      fail("a", "File does not exist."),
+      call("b", "Bash", { command: "make" }),
+      fail("b", "make: *** no rule\nline 2\nline 3"),
+   )
+   assert.deepEqual(body(t, env), [
+      "[tool] read missing.txt → error: File does not exist.",
+      '[tool] Bash {"command":"make"} → error: make: *** no rule (full: peer/1.txt)',
+   ])
+})
+
+test("a CC Edit is an inline compact diff", () => {
+   const t = trail(
+      call("e", "Edit", { file_path: "a.ts", old_string: "a\nb", new_string: "a\nc" }),
+      ok("e", "The file a.ts has been updated successfully."),
+   )
+   assert.deepEqual(body(t), ["[tool] edit a.ts\n```diff\n-a\n-b\n+a\n+c\n```"])
 })
 
 test("a pi multi-hunk edit renders each hunk", () => {
-   const text = packageText(
-      formatPeerPackage(
-         trail({
-            kind: "call",
-            id: "e",
-            name: "edit",
-            input: {
-               path: "b.md",
-               edits: [
-                  { oldText: "x", newText: "y" },
-                  { oldText: "p", newText: "" },
-               ],
-            },
-         }),
-         fakeStore().put,
-      ),
+   const t = trail(
+      call("e", "edit", {
+         path: "b.md",
+         edits: [
+            { oldText: "x", newText: "y" },
+            { oldText: "p", newText: "" },
+         ],
+      }),
+      ok("e", "ok"),
    )
-   assert.match(
-      text,
-      /\[tool\] edit b\.md → no result recorded\n```diff\n-x\n\+y\n@@\n-p\n```/,
-   )
+   assert.deepEqual(body(t), ["[tool] edit b.md\n```diff\n-x\n+y\n@@\n-p\n```"])
 })
 
 test("a diff containing a code fence gets a longer fence", () => {
-   const text = packageText(
-      formatPeerPackage(
-         trail({
-            kind: "call",
-            id: "e",
-            name: "Edit",
-            input: { file_path: "r.md", old_string: "```js", new_string: "```ts" },
-         }),
-         fakeStore().put,
-      ),
-   )
-   assert.match(text, /\n````diff\n-```js\n\+```ts\n````/)
-})
-
-test("a failed edit says so", () => {
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            {
-               kind: "call",
-               id: "e",
-               name: "Edit",
-               input: { file_path: "a", old_string: "x", new_string: "y" },
-            },
-            { kind: "result", id: "e", text: "old_string not found", isError: true },
-         ),
-         fakeStore().put,
-      ),
+   const t = trail(
+      call("e", "Edit", { file_path: "r.md", old_string: "```js", new_string: "```ts" }),
+      ok("e", ""),
    )
    assert.match(
-      text,
-      /\[tool\] Edit a → failed, error output peer\/1\.txt \(1 line\)\n```diff/,
+      packageText(formatPeerPackage(t, fakeEnv().env)),
+      /\n````diff\n-```js\n\+```ts\n````/,
    )
 })
 
-test("a Write is referenced with its line count, never inlined", () => {
-   const store = fakeStore()
-   const content = "one\ntwo\nthree\n"
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            {
-               kind: "call",
-               id: "w",
-               name: "Write",
-               input: { file_path: "n.txt", content },
-            },
-            { kind: "result", id: "w", text: "ok", isError: false },
-         ),
-         store.put,
-      ),
+test("a failed edit is a marker with the attempted diff by reference", () => {
+   const { env, stored } = fakeEnv()
+   const t = trail(
+      call("e", "Edit", { file_path: "a", old_string: "x", new_string: "y" }),
+      fail("e", "old_string not found"),
    )
-   assert.deepEqual(body(text), ["[tool] Write n.txt (3 lines) → content peer/1.txt"])
-   assert.equal(store.stored.get(content), "peer/1.txt")
-})
-
-test("an oversized tool input is referenced instead of inlined", () => {
-   const store = fakeStore()
-   const command = "echo x\n".repeat(400)
-   const text = packageText(
-      formatPeerPackage(
-         trail(
-            { kind: "call", id: "a", name: "Bash", input: { command } },
-            { kind: "result", id: "a", text: "x", isError: false },
-         ),
-         store.put,
-      ),
-   )
-   assert.deepEqual(body(text), [
-      `[tool] Bash → input peer/1.txt (${JSON.stringify({ command }, null, 2).length} chars) → output peer/2.txt (1 line)`,
+   assert.deepEqual(body(t, env), [
+      "[tool] edit a → error: old_string not found (attempted diff: peer/1.txt)",
    ])
-   assert.doesNotMatch(text, /echo x/)
+   assert.equal(stored.get("peer/1.txt"), "-x\n+y")
+})
+
+test("an oversized edit is referenced instead of inlined", () => {
+   const old = "z\n".repeat(1500)
+   const t = trail(
+      call("e", "Edit", { file_path: "a", old_string: old, new_string: "" }),
+      ok("e", ""),
+   )
+   assert.deepEqual(body(t), ["[tool] edit a → diff peer/1.txt (1501 lines)"])
+})
+
+test("a write is path and line count; the content is stored only if the file changed since", () => {
+   const content = "one\ntwo\nthree\n"
+   const same = fakeEnv({ "n.txt": content })
+   const t = trail(
+      call("w", "Write", { file_path: "n.txt", content }),
+      ok("w", "File created"),
+   )
+   assert.deepEqual(body(t, same.env), ["[tool] wrote n.txt (3 lines)"])
+   assert.equal(same.stored.size, 0)
+   const changed = fakeEnv({ "n.txt": "other" })
+   assert.deepEqual(body(t, changed.env), [
+      "[tool] wrote n.txt (3 lines; file changed since; peer's version: peer/1.txt)",
+   ])
+})
+
+test("a subagent shows a brief, its report, and where its transcript is", () => {
+   const t = trail(
+      call("s", "Agent", {
+         description: "List markdown files",
+         prompt: "Glob *.md and report",
+      }),
+      {
+         kind: "result",
+         id: "s",
+         text: "inventory.md",
+         isError: false,
+         transcript: "sess/subagents/agent-1.jsonl",
+      },
+   )
+   assert.deepEqual(body(t), [
+      "[tool] subagent: List markdown files (full prompt: peer/1.txt) (transcript: sess/subagents/agent-1.jsonl)",
+      "[subagent report]\ninventory.md",
+   ])
+})
+
+test("a long subagent prompt and report are cut, with the full text by reference", () => {
+   const { env, stored } = fakeEnv()
+   const report = `${"finding\n".repeat(300)}`
+   const t = trail(
+      call("s", "subagent", { agent: "scout", task: `${"look ".repeat(60)}` }),
+      ok("s", report),
+   )
+   const [head, shown] = body(t, env)
+   assert.match(
+      head ?? "",
+      /^\[tool\] subagent scout: (look ){30,}.*… \(full prompt: peer\/1\.txt\)$/,
+   )
+   assert.match(
+      shown ?? "",
+      /^\[subagent report\]\nfinding\n[\s\S]*\n… \(full report: peer\/2\.txt\)$/,
+   )
+   assert.ok((shown?.length ?? 0) < 1_700)
+   assert.equal(stored.get("peer/2.txt"), report)
+})
+
+test("web and MCP output is always by reference, even when tiny", () => {
+   const t = trail(
+      call("w", "WebFetch", { url: "https://example.com" }),
+      ok("w", "Example Domain"),
+      call("m", "mcp__docs__query", { q: "x" }),
+      ok("m", "one"),
+   )
+   assert.deepEqual(body(t), [
+      '[tool] WebFetch {"url":"https://example.com"} → 1 line, peer/1.txt',
+      '[tool] mcp__docs__query {"q":"x"} → 1 line, peer/2.txt',
+   ])
+})
+
+test("noise tools are dropped with their results, but still accounted for", () => {
+   const t = trail(
+      call("n", "TodoWrite", { todos: [{ content: "x" }] }),
+      ok("n", "Todos updated"),
+      { kind: "text", text: "Done." },
+   )
+   const pkg = formatPeerPackage(t, fakeEnv().env)
+   assert.deepEqual(packageText(pkg).split("\n\n").slice(1, -1), ["Done."])
+   assert.deepEqual(pkg.interactions, [
+      { id: "n", tool: "TodoWrite", kind: "noise", pointers: [] },
+   ])
+})
+
+test("an unknown tool falls back to a truncated input and an output pointer, never dropped", () => {
+   const { env } = fakeEnv()
+   const t = trail(call("u", "Frobnicate", { blob: "q".repeat(400) }), ok("u", "done"))
+   const [line] = body(t, env)
+   assert.match(
+      line ?? "",
+      /^\[tool\] Frobnicate \{"blob":"q+… \(full input: peer\/1\.txt\) → 1 line, peer\/2\.txt$/,
+   )
+})
+
+test("parallel calls pair with their results by id; missing and orphan results are stated", () => {
+   const t = trail(
+      call("a", "Grep", { pattern: "x" }),
+      call("b", "Glob", { pattern: "*.ts" }),
+      ok("b", "b.ts"),
+      ok("a", ""),
+      call("c", "Bash", { command: "sleep 99" }),
+      ok("zzz", "stray"),
+   )
+   assert.deepEqual(body(t), [
+      '[tool] Grep {"pattern":"x"} → no output',
+      '[tool] Glob {"pattern":"*.ts"} → b.ts',
+      '[tool] Bash {"command":"sleep 99"} → no result recorded',
+      "[tool output] → stray",
+   ])
 })
 
 test("a human prompt inside the span is marked as the human's", () => {
-   const text = packageText(
-      formatPeerPackage(
+   assert.deepEqual(
+      body(
          trail(
             { kind: "prompt", text: "and the cache?" },
             { kind: "text", text: "Warm." },
          ),
-         fakeStore().put,
       ),
+      ["[the human's prompt to the peer]\nand the cache?", "Warm."],
    )
-   assert.deepEqual(body(text), [
-      "[the human's prompt to the peer]\nand the cache?",
-      "Warm.",
-   ])
 })
 
 test("a degraded trail is flagged as possibly incomplete", () => {
-   const text = packageText(
-      formatPeerPackage(
-         { items: [{ kind: "text", text: "Partial." }], issues: ["line 3: bad JSON"] },
-         fakeStore().put,
-      ),
+   const pkg = formatPeerPackage(
+      { items: [{ kind: "text", text: "Partial." }], issues: ["bad"] },
+      fakeEnv().env,
    )
-   assert.match(text, /\[note\][^\n]*incomplete/)
+   assert.match(packageText(pkg), /\[note\][^\n]*incomplete/)
 })
 
 test("multi-block text becomes one segment per markdown block", () => {
    const pkg = formatPeerPackage(
       trail({ kind: "text", text: "Para.\n\n```\na\n\nb\n```\n\n- x\n- y" }),
-      fakeStore().put,
+      fakeEnv().env,
    )
    const prose = pkg.segments.filter((s) => s.kind === "prose").map((s) => s.text)
    assert.deepEqual(prose, ["Para.", "```\na\n\nb\n```", "- x\n- y"])

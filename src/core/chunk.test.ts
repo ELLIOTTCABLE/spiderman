@@ -8,7 +8,7 @@ const prose = (text: string): Segment => ({ kind: "prose", text })
 const tool = (text: string, compact?: string): Segment =>
    compact === undefined ? { kind: "tool", text } : { kind: "tool", text, compact }
 
-const pkg = (...segments: Segment[]): PeerPackage => ({ segments })
+const pkg = (...segments: Segment[]): PeerPackage => ({ segments, interactions: [] })
 const fullPath = ".spiderman/peer/full.txt"
 
 function stripLabel(chunk: string): string {
