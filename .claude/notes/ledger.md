@@ -102,9 +102,37 @@ human reads A_N + elided B_N, types U_{N+1}
 - Stop-hook `decision: "block"` is a cache hazard (2.1.259).
 - Subagents get a 5 min cache TTL on a subscription. G1 doesn't use them.
 
+### Model-routing guard (smoke finding D10)
+- pi falls back to fuzzy matching across *all* providers when `provider/id` has no exact match. A typo or catalog change could therefore silently route B or the mediator to a pay-as-you-go provider.
+- The extension resolves the mediator model only with `modelRegistry.find(provider, id)`. If that fails, it disables elision and shows B in full.
+- It refuses to inject into B unless `ctx.model.provider` is on an allowlist; the default is `openai-codex`.
+
+## Smoke results (2026-09-30, all +SURE, observed)
+- **CC plugin via `--plugin-dir` works headless and interactive.**
+  - Exec-form hooks with `${CLAUDE_PLUGIN_ROOT}`; the same script with distinct args is not deduplicated.
+  - Each UserPromptSubmit hook gets its own `hook_additional_context` attachment, in completion order.
+  - Stop stdin has `last_assistant_message` + `prompt_id`. Its `systemMessage` renders as `⎿ Stop says: …`, and the model never sees it.
+- **Hook context is in the cached prefix on later turns** (cache_read grew by exactly the prior turn's creation). Writes are 1h TTL.
+- **pi:**
+  - `-e` extension in `--mode rpc`: a `node:http` server on 127.0.0.1:0 inside pi.exe works, and `POST` → `sendUserMessage` → `agent_settled` round-trips.
+  - Mediator call: `ctx.modelRegistry.complete(ctx.modelRegistry.find("openai-codex","gpt-6-luna"), {systemPrompt, messages}, {})` works with pi's own auth and is not recorded in the session.
+- **npm:** `npm install --ignore-scripts` is sufficient.
+  - pi ships real `.d.ts` (needs `skipLibCheck`).
+  - `@lydell/node-pty` is prebuilt for win32, so a headless ConPTY test rig works for interactive CC and pi.
+- **Test hygiene:**
+  - Scrub inherited `CLAUDE_*`/`CLAUDE_CODE_*` env from child sessions; it carries the parent's RC bridge and IDE port.
+  - Spawn the real `mise/installs/.../claude.exe` and `pi.exe`, not the shims, so kills land.
+  - Interactive CC under `C:\Users\ec` asks once about external CLAUDE.md imports.
+
 ## Lanes
-- `smoke`: prober builder. Fast check of every tool and requirement while the human is awake. Then deeper probes in scratch: chunk delivery, additionalContext persistence and cache, Stop-hook wait UX, pi idle injection, mediator call, Codex cache across idle gaps.
-- `core`: not yet started. Repo toolchain, pure core (TDD), then the extension and hooks.
+- `smoke` / `probes`: prober builder, scratch only. Smoke done. Round 2 covers:
+  - pi OAuth-refresh locking;
+  - chunk capacity and overflow;
+  - Stop-hook wait UX and queued prompts;
+  - UserPromptSubmit on mid-turn messages;
+  - a Codex cache idle-gap schedule (~75 min, background);
+  - scrubbed fixtures.
+- `core`: core builder in `.tmp/trees/core` (`ai/core`). Toolchain + pure core (TDD), then a stop for the integration brief.
 
 ## Open questions for the human (non-blocking; defaults applied)
 - `ask-bx-versus-mediator`: is the mediator default acceptable, given the token remit?
