@@ -24,11 +24,14 @@ export function mediatorInput(aText: string, bText: string): string {
 
 const INDEX_WORDS = 6
 
+/** opens every Bx prompt, so a session's record can tell the exchange apart from the human's */
+export const BX_MARK = "[elision request from the harness, not from the human."
+
 // B has its own answer in context already, so an index of it suffices
 export function bxPrompt(aText: string, bBlocks: readonly Block[]): string {
    const index = bBlocks.map((block, i) => `${i + 1}: "${leadWords(block, INDEX_WORDS)}"`)
    return [
-      "[elision request from the harness, not from the human. This exchange is removed from the conversation once answered.]",
+      `${BX_MARK} This exchange is removed from the conversation once answered.]`,
       "A peer model answered the human's last message too. The reader sees the peer's answer (answer A) in full, then your last answer (answer B). List the paragraphs of answer B that are fully redundant with answer A, so they can be collapsed.",
       CRITERIA,
       `<answer_a>\n${aText}\n</answer_a>`,

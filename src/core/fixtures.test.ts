@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { existsSync, readFileSync } from "node:fs"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
-import { ccTrail } from "./cc-trail.ts"
+import { type CcViewOptions, ccView } from "./cc-trail.ts"
 import { measurePackage } from "./measure.ts"
 import { formatPeerPackage, type PackageEnv, packageText } from "./package.ts"
 import { piTrail } from "./pi-trail.ts"
@@ -11,13 +11,24 @@ import { piTrail } from "./pi-trail.ts"
 const fixturePath = (name: string) =>
    fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
 const fixture = (name: string) => readFileSync(fixturePath(name), "utf8")
+// the injected user turn is ours: a session view leaves it out the same way
 const piMessages = (jsonl: string) =>
    jsonl
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line))
-      .filter((entry) => entry.type === "message")
+      .filter((entry) => entry.type === "message" && entry.message.role !== "user")
       .map((entry) => entry.message)
+
+/** A's live trail after the prompt with this id. */
+function ccTrailAfter(jsonl: string, promptId: string, options: CcViewOptions = {}) {
+   const prompt = jsonl
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line))
+      .find((entry) => entry.promptId === promptId)
+   return ccView(jsonl, options).trail(prompt?.uuid, undefined)
+}
 
 /** Files the peer touched are gone, so every read stores the peer's view. */
 function storeEnv() {
@@ -35,9 +46,10 @@ function storeEnv() {
 }
 
 test("simple CC turn: calls, results and the answer, nothing injected", () => {
-   const trail = ccTrail(fixture("cc-transcript.jsonl"), {
-      after: { promptId: "dd41731d-f63f-4324-b8d2-ef7b13e73534" },
-   })
+   const trail = ccTrailAfter(
+      fixture("cc-transcript.jsonl"),
+      "dd41731d-f63f-4324-b8d2-ef7b13e73534",
+   )
    assert.deepEqual(trail.issues, [])
    assert.deepEqual(
       trail.items.map((i) => (i.kind === "call" ? `call ${i.name}` : i.kind)),
@@ -60,11 +72,10 @@ const ccPersisted =
    "C:/Users/user\\.claude\\projects\\C--Users-user-AppData-Local-Temp-claude-C--Users-user-Sync-Code-spiderman-841ae747-b803-42a5-8162-61d1499fb24a-scratchpad-probes-p5b-cc-work\\ef355700-22ae-4585-a3e0-c6adaa344d3c\\tool-results\\bq2lt4hua.txt"
 
 function ccRichPackage() {
-   const trail = ccTrail(
-      fixture(ccRich),
-      { after: { promptId: "36c16836-f293-4bfe-a837-e3748bcb4188" } },
-      { transcriptPath: fixturePath(ccRich), exists: existsSync },
-   )
+   const trail = ccTrailAfter(fixture(ccRich), "36c16836-f293-4bfe-a837-e3748bcb4188", {
+      transcriptPath: fixturePath(ccRich),
+      exists: existsSync,
+   })
    const { env, stored } = storeEnv()
    const pkg = formatPeerPackage(trail, env)
    return { trail, pkg, text: packageText(pkg), stored }

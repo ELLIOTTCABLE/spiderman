@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { ccTrail } from "./cc-trail.ts"
+import { type CcViewOptions, ccView } from "./cc-trail.ts"
+import { sha256Hex } from "./store.ts"
 
 // synthetic, shaped after ref-cc-hooks §8; never real transcripts (private data)
 const base = { sessionId: "s", cwd: "C:/p", version: "2.1.286", isSidechain: false }
@@ -51,6 +52,40 @@ function jsonl(...entries: object[]): string {
       return entry
    })
    return `${linked.map((e) => JSON.stringify(e)).join("\n")}\n`
+}
+
+type At = { readonly promptId: string } | { readonly uuid: string }
+
+/** The live trail after one entry and before another, named the way these tests name them. */
+function ccTrail(
+   text: string,
+   span: { after?: At; until?: At } = {},
+   options: CcViewOptions = {},
+) {
+   const lines = text.split("\n").flatMap((line) => {
+      try {
+         return [JSON.parse(line) as Record<string, unknown>]
+      } catch {
+         return []
+      }
+   })
+   const find = (at: At, from = -1) =>
+      lines.findIndex(
+         (e, i) =>
+            i > from && ("uuid" in at ? e.uuid === at.uuid : e.promptId === at.promptId),
+      )
+   const start = span.after === undefined ? -1 : find(span.after)
+   const stop = span.until === undefined ? -1 : find(span.until, start)
+   const view = ccView(text, options)
+   const live = new Set(view.live.map((e) => e.id))
+   const through =
+      stop === -1
+         ? undefined
+         : lines.slice(0, stop).findLast((e) => live.has(String(e.uuid)))
+   return view.trail(
+      start === -1 ? undefined : String(lines[start]?.uuid),
+      through === undefined ? undefined : String(through.uuid),
+   )
 }
 
 const turn1 = [
@@ -125,20 +160,6 @@ test("without a start cursor the whole file is read, first prompt included", () 
    assert.deepEqual(trail.items[0], { kind: "prompt", text: "first question" })
 })
 
-test("a uuid also works as a cursor", () => {
-   const marker = assistant({ type: "text", text: "marker" })
-   const trail = ccTrail(jsonl(marker, assistant({ type: "text", text: "after" })), {
-      after: { uuid: marker.uuid },
-   })
-   assert.deepEqual(trail.items, [{ kind: "text", text: "after" }])
-})
-
-test("an unknown start cursor yields nothing and says so, so callers can fall back", () => {
-   const trail = ccTrail(transcript, { after: { promptId: "gone" } })
-   assert.deepEqual(trail.items, [])
-   assert.equal(trail.issues.length, 1)
-})
-
 test("injected hook context, meta, sidechain, and system entries never enter the trail", () => {
    const trail = ccTrail(
       jsonl(
@@ -182,7 +203,11 @@ test("malformed lines and entries degrade the trail instead of throwing", () => 
       { kind: "text", text: "one" },
       { kind: "text", text: "two" },
    ])
-   assert.equal(trail.issues.length, 4)
+   assert.deepEqual(
+      trail.issues.map((i) => i.split(":")[0]),
+      ["line 3", "line 4", "line 2"],
+      "a half-written last line is still being written, not broken",
+   )
 })
 
 test("CRLF line endings are tolerated", () => {
@@ -242,49 +267,40 @@ test("a rewound branch is left out; the branch the human continued on is read", 
    )
 })
 
-test("a start that was rewound away is marked, then the live branch after the fork follows", () => {
+test("the live branch can run back from a given entry, leaving newer branches out", () => {
    const p1 = prompt("first", "p1")
    const a1 = said("m1", "answer one")
    const p2 = prompt("abandoned", "p2")
    const a2 = said("m2", "abandoned answer")
    const p3 = after(a1, prompt("edited instead", "p3"))
-   const a3 = said("m3", "answer three")
-   const trail = ccTrail(jsonl(p1, a1, p2, a2, p3, a3), { after: { promptId: "p2" } })
-   assert.deepEqual(trail, {
-      items: [
-         { kind: "rewind", withdrawn: "abandoned" },
-         { kind: "prompt", text: "edited instead" },
-         { kind: "text", text: "answer three" },
-      ],
-      issues: [],
-   })
+   const view = ccView(jsonl(p1, a1, p2, a2, p3), { leaf: p3.uuid })
+   assert.deepEqual(
+      view.live.map((e) => e.id),
+      [p1.uuid, a1.uuid, p3.uuid],
+   )
+   assert.equal(view.parent(a2.uuid), p2.uuid, "abandoned entries keep their parents")
+   assert.equal(view.parent(p1.uuid), null)
+   assert.equal(view.parent("unknown"), undefined)
 })
 
-test("a rewind past several delivered turns names the first one withdrawn", () => {
+test("entries say what they hold: a prompt, an answer's text, a delivery we sent", () => {
    const p1 = prompt("first", "p1")
-   const a1 = said("m1", "answer one")
-   const p2 = prompt("second", "p2")
-   const a2 = said("m2", "answer two")
-   const p3 = prompt("third", "p3")
-   const a3 = said("m3", "answer three")
-   const p4 = after(a1, prompt("second, again", "p4"))
-   const trail = ccTrail(jsonl(p1, a1, p2, a2, p3, a3, p4), {
-      after: { uuid: a3.uuid },
-      until: { promptId: "p4" },
+   const hook = attachment({
+      type: "hook_additional_context",
+      content: ["[peer 1/2] one", "[peer 2/2] two"],
+      hookName: "UserPromptSubmit",
    })
-   assert.deepEqual(trail.items, [{ kind: "rewind", withdrawn: "second" }])
-})
-
-test("a start beside the chain that holds no turns is not a rewind", () => {
-   const p1 = prompt("first", "p1")
    const a1 = said("m1", "answer one")
-   const hook = after(a1, attachment({ type: "hook_success" }))
-   const p2 = after(a1, prompt("next", "p2"))
-   const a2 = said("m2", "answer two")
-   const trail = ccTrail(jsonl(p1, a1, hook, p2, a2), { after: { uuid: hook.uuid } })
-   assert.deepEqual(trail.items, [
-      { kind: "prompt", text: "next" },
-      { kind: "text", text: "answer two" },
+   const view = ccView(jsonl(p1, hook, a1), { hash: sha256Hex })
+   assert.deepEqual(view.live, [
+      { id: p1.uuid, content: true, startsTurn: true, prompt: "first", carries: [] },
+      {
+         id: hook.uuid,
+         content: false,
+         startsTurn: false,
+         carries: [sha256Hex("[peer 1/2] one"), sha256Hex("[peer 2/2] two")],
+      },
+      { id: a1.uuid, content: true, startsTurn: false, text: "answer one", carries: [] },
    ])
 })
 

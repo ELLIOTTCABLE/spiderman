@@ -1,5 +1,4 @@
 import { splitBlocks } from "./blocks.ts"
-import { sha256Hex } from "./store.ts"
 import {
    classify,
    editHunks,
@@ -35,14 +34,6 @@ export interface Interaction {
 export interface PeerPackage {
    readonly segments: readonly Segment[]
    readonly interactions: readonly Interaction[]
-   /** pass back as `prior` for this receiver's next package */
-   readonly memory: PackageMemory
-}
-
-/** one per receiver, carried package to package; plain JSON, opaque to callers */
-export interface PackageMemory {
-   /** [path, view fingerprint, pointer given], oldest first */
-   readonly reads: readonly (readonly [string, string, string])[]
 }
 
 export interface PackageEnv {
@@ -72,19 +63,13 @@ const DIFF_BUDGET = 8_000
 const BRIEF_LIMIT = 160
 const PROMPT_QUOTE_LIMIT = 100
 const REPORT_LIMIT = 1_500
-// bounds a long session's memory; older reads are simply shown again
-const MEMORY_READS = 1_000
 
 interface Rendered {
    readonly segments: readonly Segment[]
    readonly pointers: readonly string[]
 }
 
-export function formatPeerPackage(
-   trail: Trail,
-   env: PackageEnv,
-   prior?: PackageMemory,
-): PeerPackage {
+export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
    const calls = new Map<string, TrailCall>()
    for (const item of trail.items)
       if (item.kind === "call" && item.id !== undefined) calls.set(item.id, item)
@@ -95,7 +80,9 @@ export function formatPeerPackage(
       }
    }
 
-   const reads = new ReadMemory(prior)
+   const reads = new ReadMemory()
+   const turns = trail.items.filter((i) => i.kind === "turn").length
+   let turn = 0
    const segments: Segment[] = [{ kind: "frame", text: OPENING }]
    const interactions: Interaction[] = []
    if (trail.issues.length > 0) {
@@ -108,17 +95,19 @@ export function formatPeerPackage(
    }
    for (const item of trail.items) {
       if (item.kind === "prompt") {
-         segments.push({
-            kind: "prompt",
-            text: `[the human's prompt to the peer]\n${item.text}`,
-         })
+         const said = item.direct
+            ? "[the human messaged the peer directly]"
+            : "[the human's prompt to the peer]"
+         segments.push({ kind: "prompt", text: `${said}\n${item.text}` })
+      } else if (item.kind === "turn") {
+         // one answer needs no heading; several, each under the message it answers
+         if (turns > 1)
+            segments.push({ kind: "frame", text: turnLine(item, ++turn, turns) })
       } else if (item.kind === "text") {
          for (const block of splitBlocks(item.text))
             segments.push({ kind: "prose", text: block.raw })
       } else if (item.kind === "halt") {
          segments.push({ kind: "frame", text: haltLine(item) })
-      } else if (item.kind === "rewind") {
-         segments.push({ kind: "frame", text: rewindLine(item.withdrawn) })
       } else if (item.kind === "call") {
          const result = item.id === undefined ? undefined : results.get(item.id)
          const spec = classify(item.name)
@@ -152,7 +141,7 @@ export function formatPeerPackage(
       }
    }
    segments.push({ kind: "frame", text: CLOSING })
-   return { segments: withinDiffBudget(segments), interactions, memory: reads.memory() }
+   return { segments: withinDiffBudget(segments), interactions }
 }
 
 // past the budget, the largest inline diffs become refs (lossless)
@@ -176,12 +165,9 @@ export function packageText(pkg: PeerPackage): string {
    return pkg.segments.map((s) => s.text).join("\n\n")
 }
 
-function rewindLine(withdrawn: string | undefined): string {
-   const point =
-      withdrawn === undefined
-         ? "an earlier point; the peer's later turns"
-         : `before the prompt "${clip(withdrawn, PROMPT_QUOTE_LIMIT)}"; the peer's turns from that prompt on`
-   return `[the human rewound the peer's conversation to ${point} were withdrawn and no longer stand]`
+function turnLine(item: Extract<TrailItem, { kind: "turn" }>, i: number, n: number) {
+   const quoted = clip(item.prompts.join(" / ").replace(/\s+/g, " "), PROMPT_QUOTE_LIMIT)
+   return `[peer answer ${i} of ${n}, to the human's message "${quoted}"]`
 }
 
 function haltLine(halt: Extract<TrailItem, { kind: "halt" }>): string {
@@ -561,18 +547,11 @@ interface Seen {
    readonly written: boolean
 }
 
+// within one package only: a receiver may since have rewound past an earlier one
 class ReadMemory {
    readonly #seen = new Map<string, Seen[]>()
-   readonly #given: (readonly [string, string, string])[]
-   readonly #earlier = new Map<string, string>()
 
-   constructor(prior: PackageMemory | undefined) {
-      this.#given = [...(prior?.reads ?? [])]
-      for (const [path, fingerprint, pointer] of this.#given)
-         this.#earlier.set(`${path}\n${fingerprint}`, pointer)
-   }
-
-   /** range: same view again here; covered: inside an earlier view; given: in an earlier package */
+   /** range: same view again; covered: inside an earlier view */
    find(path: string, view: ReadView) {
       for (const earlier of this.#seen.get(path) ?? []) {
          const offset = view.start - earlier.view.start
@@ -592,26 +571,12 @@ class ReadMemory {
             pointers: earlier.pointers,
          }
       }
-      const given = this.#earlier.get(`${path}\n${fingerprint(view)}`)
-      return given === undefined
-         ? undefined
-         : { same: "given" as const, pointers: [given] }
+      return undefined
    }
 
    add(path: string, view: ReadView, pointers: readonly string[], written = false) {
       this.#seen.set(path, [...(this.#seen.get(path) ?? []), { view, pointers, written }])
-      const [pointer] = pointers
-      if (pointer !== undefined) this.#given.push([path, fingerprint(view), pointer])
    }
-
-   memory(): PackageMemory {
-      return { reads: this.#given.slice(-MEMORY_READS) }
-   }
-}
-
-function fingerprint(view: ReadView): string {
-   const digest = sha256Hex(view.lines.join("\n")).slice(0, 32)
-   return `${view.start}:${view.lines.length}:${digest}`
 }
 
 function sameLines(current: string, view: ReadView): boolean {

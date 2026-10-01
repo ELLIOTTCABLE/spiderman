@@ -561,19 +561,6 @@ test("reading back what was just written adds nothing", () => {
    assert.deepEqual(body(t, env), ["[tool] wrote n.md (2 lines)"])
 })
 
-test("a view already given in an earlier package is not repeated; a changed one is", () => {
-   const { env } = fakeEnv({ "a.md": "one\ntwo\n" })
-   const read = (id: string, lines: string[]) =>
-      trail(call(id, "Read", { file_path: "a.md" }), ok(id, numbered(1, lines)))
-   const first = formatPeerPackage(read("r1", ["one", "two", ""]), env)
-   const memory = JSON.parse(JSON.stringify(first.memory))
-   const again = formatPeerPackage(read("r2", ["one", "two", ""]), env, memory)
-   assert.deepEqual(packageText(again).split("\n\n").slice(1, -1), [])
-   assert.deepEqual(again.interactions[0]?.pointers, ["a.md"])
-   const changed = formatPeerPackage(read("r3", ["one", "TWO", ""]), env, again.memory)
-   assert.match(packageText(changed), /\[tool\] read a\.md L1–3 \(file changed since/)
-})
-
 test("paths under the shared cwd are shown relative to it; others stay absolute", () => {
    const { env } = fakeEnv({ "C:\\proj\\specs\\a.md": "one\ntwo" })
    const t = trail(
@@ -599,20 +586,31 @@ test("paths under the shared cwd are shown relative to it; others stay absolute"
    assert.deepEqual(pkg.interactions[0]?.pointers, ["C:\\proj\\specs\\a.md"])
 })
 
-test("a rewind says which of the peer's turns no longer stand", () => {
+test("a message the human typed straight to the peer says so; a shared prompt doesn't", () => {
    assert.deepEqual(
       body(
          trail(
-            { kind: "rewind", withdrawn: "Rename the module, then\nmore" },
+            { kind: "prompt", text: "why did that fail?", direct: true },
             { kind: "prompt", text: "Rename it" },
          ),
       ),
       [
-         `[the human rewound the peer's conversation to before the prompt "Rename the module, then…"; the peer's turns from that prompt on were withdrawn and no longer stand]`,
+         "[the human messaged the peer directly]\nwhy did that fail?",
          "[the human's prompt to the peer]\nRename it",
       ],
    )
-   assert.deepEqual(body(trail({ kind: "rewind" })), [
-      "[the human rewound the peer's conversation to an earlier point; the peer's later turns were withdrawn and no longer stand]",
+})
+
+test("several answers get a heading each; a lone answer gets none", () => {
+   const answer = (prompt: string, text: string): TrailItem[] => [
+      { kind: "turn", prompts: [prompt] },
+      { kind: "text", text },
+   ]
+   assert.deepEqual(body(trail(...answer("U1", "One."), ...answer("U2", "Two."))), [
+      '[peer answer 1 of 2, to the human\'s message "U1"]',
+      "One.",
+      '[peer answer 2 of 2, to the human\'s message "U2"]',
+      "Two.",
    ])
+   assert.deepEqual(body(trail(...answer("U1", "One."))), ["One."])
 })

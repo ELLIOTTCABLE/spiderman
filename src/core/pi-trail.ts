@@ -1,3 +1,5 @@
+import type { SideView, ViewEntry } from "./coherence.ts"
+import { BX_MARK } from "./elision.ts"
 import {
    type Trail,
    type TrailItem,
@@ -12,8 +14,148 @@ interface Started {
    readonly label: string | undefined
 }
 
-// `unknown`: other extensions add message roles. User messages are skipped: in B's session each
-// is our own injection of A's package + the human's prompt, which A already has
+export interface PiViewOptions {
+   /** any entry's parent: null at a root, undefined for an unknown entry */
+   readonly parent: (id: string) => string | null | undefined
+   readonly hash: (text: string) => string
+   /** for a message we delivered into this session, by its text's hash: the human messages it carried */
+   readonly delivered: (hash: string) => readonly string[] | undefined
+}
+
+interface Classified {
+   readonly entry: ViewEntry
+   /** what the entry adds to a trail: a message, a delivery's answer starting, or a Bx exchange */
+   readonly as:
+      | { readonly kind: "message"; readonly message: unknown }
+      | { readonly kind: "delivery"; readonly prompts: readonly string[] }
+      | { readonly kind: "bx" }
+      | { readonly kind: "none" }
+}
+
+// `unknown`: pi's session entry shapes, read defensively; other extensions add their own
+export function piView(branch: readonly unknown[], options: PiViewOptions): SideView {
+   const classified = branch.flatMap((raw): Classified[] => {
+      if (!isRecord(raw) || typeof raw.id !== "string") return []
+      const id = raw.id
+      const none = (entry: Partial<ViewEntry> = {}): Classified => ({
+         entry: { id, content: false, startsTurn: false, carries: [], ...entry },
+         as: { kind: "none" },
+      })
+      const message = sessionMessage(raw)
+      if (message === undefined) return [none()]
+      if (message.role === "user") {
+         const text = messageText(message.content)
+         const hash = options.hash(text)
+         const prompts = options.delivered(hash)
+         if (prompts !== undefined)
+            return [
+               {
+                  entry: { id, content: false, startsTurn: true, carries: [hash] },
+                  as: { kind: "delivery", prompts },
+               },
+            ]
+         if (text.startsWith(BX_MARK)) return [{ ...none(), as: { kind: "bx" } }]
+         return [
+            {
+               entry: { id, content: true, startsTurn: true, prompt: text, carries: [] },
+               as: { kind: "message", message },
+            },
+         ]
+      }
+      const text =
+         message.role === "assistant" && Array.isArray(message.content)
+            ? message.content
+                 .flatMap((b) =>
+                    isRecord(b) && b.type === "text" && typeof b.text === "string"
+                       ? [b.text]
+                       : [],
+                 )
+                 .join("\n")
+            : ""
+      return [
+         {
+            entry: {
+               id,
+               content: true,
+               startsTurn: false,
+               ...(text === "" ? {} : { text }),
+               carries: [],
+            },
+            as: { kind: "message", message },
+         },
+      ]
+   })
+   const live = classified.map((c) => c.entry)
+
+   return {
+      live,
+      parent: options.parent,
+      trail(after, through) {
+         const from = after === undefined ? -1 : live.findIndex((e) => e.id === after)
+         const to =
+            through === undefined
+               ? live.length - 1
+               : live.findIndex((e) => e.id === through)
+         const items: TrailItem[] = []
+         const issues: string[] = []
+         let segment: unknown[] = []
+         let turn: TrailItem | undefined
+         let inBx = false
+         // each delivery's answer is read on its own, as each turn was before
+         const flush = () => {
+            const read = piTrail(segment)
+            if (read.items.length > 0 && turn !== undefined) items.push(turn)
+            items.push(...read.items)
+            issues.push(...read.issues)
+            segment = []
+            turn = undefined
+         }
+         for (const { as } of classified.slice(from + 1, to + 1)) {
+            if (as.kind === "delivery" || as.kind === "bx") {
+               flush()
+               inBx = as.kind === "bx"
+               if (as.kind === "delivery") turn = { kind: "turn", prompts: as.prompts }
+            } else if (as.kind === "message") {
+               const user = isRecord(as.message) && as.message.role === "user"
+               if (user) inBx = false
+               if (!inBx) segment.push(as.message)
+            }
+         }
+         flush()
+         return { items, issues }
+      },
+   }
+}
+
+function sessionMessage(
+   entry: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+   if (entry.type === "message" && isRecord(entry.message)) return entry.message
+   // pi-side subagent reports arrive as custom messages
+   if (entry.type === "custom_message" && entry.customType === "subagent-notification")
+      return {
+         role: "custom",
+         customType: entry.customType,
+         content: entry.content,
+         details: entry.details,
+      }
+   return undefined
+}
+
+function messageText(content: unknown): string {
+   if (typeof content === "string") return content
+   return Array.isArray(content)
+      ? content
+           .flatMap((b) =>
+              isRecord(b) && b.type === "text" && typeof b.text === "string"
+                 ? [b.text]
+                 : [],
+           )
+           .join("\n")
+      : ""
+}
+
+// `unknown`: other extensions add message roles
 export function piTrail(messages: readonly unknown[]): Trail {
    const items: TrailItem[] = []
    const issues: string[] = []
@@ -24,7 +166,9 @@ export function piTrail(messages: readonly unknown[]): Trail {
          issues.push(`message ${i}: not a message`)
          return
       }
-      if (message.role === "assistant") {
+      if (message.role === "user") {
+         items.push({ kind: "prompt", text: messageText(message.content), direct: true })
+      } else if (message.role === "assistant") {
          if (!Array.isArray(message.content)) {
             issues.push(`message ${i}: assistant content is not an array`)
             return

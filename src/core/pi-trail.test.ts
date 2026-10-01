@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { piTrail } from "./pi-trail.ts"
+import { BX_MARK } from "./elision.ts"
+import { piTrail, piView } from "./pi-trail.ts"
+import { sha256Hex } from "./store.ts"
 
 const usage = {
    input: 1,
@@ -23,7 +25,6 @@ const assistant = (content: unknown[], stopReason = "stop") => ({
 
 test("assistant text, tool calls and tool results become an ordered trail", () => {
    const trail = piTrail([
-      { role: "user", content: "[peer answer] … the human's prompt", timestamp: 0 },
       assistant(
          [
             { type: "thinking", thinking: "private reasoning", thinkingSignature: "sig" },
@@ -53,11 +54,74 @@ test("assistant text, tool calls and tool results become an ordered trail", () =
    })
 })
 
-test("user messages are skipped: they are the extension's own injected turns", () => {
+test("a user message is the human typing to this side directly", () => {
    const trail = piTrail([
-      { role: "user", content: [{ type: "text", text: "U_N" }], timestamp: 0 },
+      { role: "user", content: [{ type: "text", text: "why?" }], timestamp: 0 },
    ])
-   assert.deepEqual(trail.items, [])
+   assert.deepEqual(trail.items, [{ kind: "prompt", text: "why?", direct: true }])
+})
+
+// a branch as pi's getBranch() returns it
+let ids = 0
+const entry = (message: unknown) => ({ type: "message", id: `e${++ids}`, message })
+const user = (text: string) => entry({ role: "user", content: [{ type: "text", text }] })
+const said = (text: string) => entry(assistant([{ type: "text", text }]))
+
+function view(branch: readonly { id: string }[], deliveries: Record<string, string[]>) {
+   const byHash = new Map(Object.entries(deliveries).map(([t, p]) => [sha256Hex(t), p]))
+   return piView(branch, {
+      parent: (id) => {
+         const at = branch.findIndex((e) => e.id === id)
+         return at === -1 ? undefined : (branch[at - 1]?.id ?? null)
+      },
+      hash: sha256Hex,
+      delivered: (hash) => byHash.get(hash),
+   })
+}
+
+test("our deliveries start answers to shared messages; the human's own messages are prompts", () => {
+   const ours = user("[peer answer] …\n\n[the human's message]\nU1")
+   const branch = [ours, said("B1."), user("and why?"), said("Because.")]
+   const v = view(branch, { "[peer answer] …\n\n[the human's message]\nU1": ["U1"] })
+   assert.deepEqual(
+      v.live.map((e) => [e.startsTurn, e.content, e.carries.length]),
+      [
+         [true, false, 1],
+         [false, true, 0],
+         [true, true, 0],
+         [false, true, 0],
+      ],
+   )
+   assert.deepEqual(v.trail(undefined, undefined).items, [
+      { kind: "turn", prompts: ["U1"] },
+      { kind: "text", text: "B1." },
+      { kind: "prompt", text: "and why?", direct: true },
+      { kind: "text", text: "Because." },
+   ])
+})
+
+test("an elision exchange left on the branch never reaches a trail", () => {
+   const branch = [
+      said("B1."),
+      user(`${BX_MARK} …`),
+      said("2,5"),
+      user("next"),
+      said("B2."),
+   ]
+   assert.deepEqual(view(branch, {}).trail(undefined, undefined).items, [
+      { kind: "text", text: "B1." },
+      { kind: "prompt", text: "next", direct: true },
+      { kind: "text", text: "B2." },
+   ])
+})
+
+test("a delivery's answer still running shows nothing for it, not an empty heading", () => {
+   const ours = user("U2 package")
+   const branch = [said("B1."), ours]
+   assert.deepEqual(
+      view(branch, { "U2 package": ["U2"] }).trail(undefined, undefined).items,
+      [{ kind: "text", text: "B1." }],
+   )
 })
 
 test("thinking never reaches the trail", () => {

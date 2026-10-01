@@ -1,5 +1,5 @@
+import type { SideView, ViewEntry } from "./coherence.ts"
 import {
-   type Trail,
    type TrailItem,
    type TrailReport,
    type TrailResult,
@@ -7,19 +7,14 @@ import {
 } from "./trail.ts"
 import { isRecord } from "./validate.ts"
 
-export type Cursor = { readonly promptId: string } | { readonly uuid: string }
-
-export interface Span {
-   /** exclusive: start after the first match; absent = top of file */
-   readonly after?: Cursor
-   /** exclusive: stop before the first later match; absent = end of file */
-   readonly until?: Cursor
-}
-
-export interface CcTrailOptions {
+export interface CcViewOptions {
    /** the main transcript's own path, to find subagent transcripts beside it */
    readonly transcriptPath?: string
    readonly exists?: (path: string) => boolean
+   /** the live branch runs back from here, e.g. a prompt CC just wrote; default: the newest entry */
+   readonly leaf?: string
+   /** to recognise the attachments holding texts we delivered */
+   readonly hash?: (text: string) => string
 }
 
 type Entry = Record<string, unknown>
@@ -28,60 +23,99 @@ interface Line {
    readonly entry: Entry
 }
 
-// undocumented, version-volatile format (ref-cc-hooks §8): ignore the unknown, report the malformed
-// attachments are never read: they include the peer packages this harness injected
-export function ccTrail(
-   jsonl: string,
-   span: Span = {},
-   options: CcTrailOptions = {},
-): Trail {
-   const issues: string[] = []
-   const entries = parseLines(jsonl, issues)
-
-   const { after, until } = span
-   const start =
-      after === undefined ? -1 : entries.findIndex(({ entry }) => matches(entry, after))
-   if (after !== undefined && start === -1)
-      return { items: [], issues: [...issues, "start position not found"] }
-   let end = entries.length
-   if (until !== undefined) {
-      const at = entries.findIndex(({ entry }, i) => i > start && matches(entry, until))
-      if (at !== -1) end = at
-   }
-   const branch = liveBranch(entries, end)
+// undocumented, version-volatile format (ref-cc-hooks §8): ignore the unknown, report the malformed.
+// attachments never become items: they include the peer packages this harness injected
+export function ccView(jsonl: string, options: CcViewOptions = {}): SideView {
+   const parseIssues: { line: number; issue: string }[] = []
+   const entries = parseLines(jsonl, parseIssues)
+   const byUuid = new Map<string, number>()
+   entries.forEach(({ entry }, i) => {
+      if (typeof entry.uuid === "string") byUuid.set(entry.uuid, i)
+   })
+   const leaf = options.leaf === undefined ? undefined : byUuid.get(options.leaf)
+   const branch = liveBranch(entries, byUuid, leaf)
    const subagents = new Subagents(entries, options)
-   const items: TrailItem[] = []
-   let from = start
-   if (start !== -1 && !branch.live.has(start)) {
-      const rewind = rewound(entries, start, branch)
-      if (rewind !== undefined) {
-         from = rewind.fork
-         items.push(
-            rewind.withdrawn === undefined
-               ? { kind: "rewind" }
-               : { kind: "rewind", withdrawn: rewind.withdrawn },
+
+   const converted = new Map<number, TrailItem[] | undefined>()
+   const itemsAt = (i: number) => {
+      if (!converted.has(i)) {
+         const entry = entries[i]?.entry ?? {}
+         converted.set(
+            i,
+            entry.type === "assistant"
+               ? assistantItems(entry)
+               : entry.type === "user"
+                 ? userItems(entry, subagents)
+                 : [],
          )
       }
+      return converted.get(i)
    }
-   for (let i = from + 1; i < end; i++) {
-      const at = entries[i]
-      if (at === undefined || !branch.live.has(i)) continue
-      const { line, entry } = at
-      if (entry.isSidechain === true) continue
-      const converted =
-         entry.type === "assistant"
-            ? assistantItems(entry)
-            : entry.type === "user"
-              ? userItems(entry, subagents)
-              : []
-      if (converted === undefined)
-         issues.push(`line ${line}: unreadable ${String(entry.type)} entry`)
-      else items.push(...converted)
+
+   const indices = [...branch.live]
+      .sort((a, b) => a - b)
+      .filter((i) => {
+         const entry = entries[i]?.entry
+         return typeof entry?.uuid === "string" && entry.isSidechain !== true
+      })
+   const live = indices.map((i): ViewEntry => {
+      const entry = entries[i]?.entry ?? {}
+      const items = itemsAt(i) ?? []
+      const first = items[0]
+      const texts = items.flatMap((item) => (item.kind === "text" ? [item.text] : []))
+      return {
+         id: entry.uuid as string,
+         content: items.length > 0 || itemsAt(i) === undefined,
+         startsTurn: first?.kind === "prompt",
+         ...(first?.kind === "prompt" ? { prompt: first.text } : {}),
+         ...(texts.length > 0 ? { text: texts.join("\n") } : {}),
+         carries: carried(entry, options.hash),
+      }
+   })
+
+   return {
+      live,
+      parent(id) {
+         const i = byUuid.get(id)
+         if (i === undefined) return undefined
+         const parent =
+            entries[i]?.entry.parentUuid ?? entries[i]?.entry.logicalParentUuid
+         return typeof parent === "string" ? parent : null
+      },
+      trail(after, through) {
+         const from = after === undefined ? -1 : live.findIndex((e) => e.id === after)
+         const to =
+            through === undefined
+               ? live.length - 1
+               : live.findIndex((e) => e.id === through)
+         const items: TrailItem[] = []
+         const issues: string[] = []
+         const span = indices.slice(from + 1, to + 1)
+         for (const i of span) {
+            const found = itemsAt(i)
+            if (found === undefined)
+               issues.push(
+                  `line ${entries[i]?.line}: unreadable ${String(entries[i]?.entry.type)} entry`,
+               )
+            else items.push(...found)
+         }
+         const first = entries[span[0] ?? -1]?.line ?? Number.POSITIVE_INFINITY
+         const last = entries[span.at(-1) ?? -1]?.line ?? Number.NEGATIVE_INFINITY
+         for (const { line, issue } of parseIssues)
+            if (line > first && line < last) issues.push(`line ${line}: ${issue}`)
+         return { items: withoutSupersededNotices(items), issues }
+      },
    }
-   return { items: withoutSupersededNotices(items), issues }
 }
 
-function parseLines(jsonl: string, issues: string[]): Line[] {
+function carried(entry: Entry, hash: ((text: string) => string) | undefined): string[] {
+   const attachment = isRecord(entry.attachment) ? entry.attachment : {}
+   if (hash === undefined || attachment.type !== "hook_additional_context") return []
+   const content = Array.isArray(attachment.content) ? attachment.content : []
+   return content.flatMap((c) => (typeof c === "string" ? [hash(c)] : []))
+}
+
+function parseLines(jsonl: string, issues: { line: number; issue: string }[]): Line[] {
    const entries: Line[] = []
    jsonl.split("\n").forEach((raw, i) => {
       const line = raw.trim()
@@ -89,39 +123,30 @@ function parseLines(jsonl: string, issues: string[]): Line[] {
       try {
          const entry: unknown = JSON.parse(line)
          if (isRecord(entry)) entries.push({ line: i + 1, entry })
-         else issues.push(`line ${i + 1}: not an object`)
+         else issues.push({ line: i + 1, issue: "not an object" })
       } catch {
-         issues.push(`line ${i + 1}: not JSON`)
+         issues.push({ line: i + 1, issue: "not JSON" })
       }
    })
    return entries
 }
 
-function matches(entry: Entry, cursor: Cursor): boolean {
-   return "uuid" in cursor
-      ? entry.uuid === cursor.uuid
-      : entry.promptId === cursor.promptId
-}
-
 interface Branch {
-   /** the parent chain back from the newest entry before `end` */
-   readonly chain: ReadonlySet<number>
-   /** the chain plus the side branches of its parallel tool calls */
+   /** the parent chain back from the leaf, plus the side branches of its parallel tool calls */
    readonly live: ReadonlySet<number>
-   readonly parent: (index: number) => number | undefined
 }
 
-// rewinds leave abandoned branches in the file: walk the parent chain back from `end`. parallel
+// rewinds leave abandoned branches in the file: walk the parent chain back from the leaf. parallel
 // tool calls hang off it as side branches; their message ids pull them and their results back in
-function liveBranch(entries: readonly Line[], end: number): Branch {
+function liveBranch(
+   entries: readonly Line[],
+   byUuid: ReadonlyMap<string, number>,
+   leaf: number | undefined,
+): Branch {
    if (!entries.some(({ entry }) => typeof entry.parentUuid === "string")) {
-      const all = new Set(entries.keys())
-      return { chain: all, live: all, parent: (i) => (i > 0 ? i - 1 : undefined) }
+      const end = leaf ?? entries.length - 1
+      return { live: new Set([...entries.keys()].filter((i) => i <= end)) }
    }
-   const byUuid = new Map<string, number>()
-   entries.forEach(({ entry }, i) => {
-      if (typeof entry.uuid === "string") byUuid.set(entry.uuid, i)
-   })
    const parent = (i: number) => {
       const entry = entries[i]?.entry
       const id = entry?.parentUuid ?? entry?.logicalParentUuid
@@ -130,17 +155,20 @@ function liveBranch(entries: readonly Line[], end: number): Branch {
 
    const chain = new Set<number>()
    const messages = new Set<string>()
-   const leaf = end < entries.length ? parent(end) : newestChained(entries)
-   for (let i = leaf; i !== undefined && !chain.has(i); i = parent(i)) {
+   for (
+      let i = leaf ?? newestChained(entries);
+      i !== undefined && !chain.has(i);
+      i = parent(i)
+   ) {
       chain.add(i)
       const id = messageId(entries[i]?.entry)
       if (id !== undefined) messages.add(id)
    }
+   const end = Math.max(-1, ...chain)
 
    const live = new Set(chain)
-
    const calls = new Set<string>()
-   for (let i = 0; i < end; i++) {
+   for (let i = 0; i <= end; i++) {
       const entry = entries[i]?.entry
       const id = messageId(entry)
       if (id === undefined || !messages.has(id)) continue
@@ -149,7 +177,7 @@ function liveBranch(entries: readonly Line[], end: number): Branch {
          if (block.type === "tool_use" && typeof block.id === "string")
             calls.add(block.id)
    }
-   for (let i = 0; i < end; i++) {
+   for (let i = 0; i <= end; i++) {
       const entry = entries[i]?.entry
       if (live.has(i) || entry?.type !== "user") continue
       const results = contentBlocks(entry).filter((b) => b.type === "tool_result")
@@ -161,41 +189,7 @@ function liveBranch(entries: readonly Line[], end: number): Branch {
       )
          live.add(i)
    }
-   return { chain, live, parent }
-}
-
-/** a rewind if the path from `start` back to the chain holds turns; `withdrawn` is its first prompt */
-function rewound(
-   entries: readonly Line[],
-   start: number,
-   branch: Branch,
-): { fork: number; withdrawn: string | undefined } | undefined {
-   const abandoned: Entry[] = []
-   let fork: number | undefined = start
-   while (fork !== undefined && !branch.chain.has(fork)) {
-      const entry = entries[fork]?.entry
-      if (entry !== undefined) abandoned.push(entry)
-      fork = branch.parent(fork)
-   }
-   if (fork === undefined) return undefined
-   const turns = abandoned.filter(
-      (e) => (e.type === "user" || e.type === "assistant") && e.isMeta !== true,
-   )
-   if (turns.length === 0) return undefined
-   const prompt = turns.findLast(isHumanPrompt)
-   return { fork, withdrawn: prompt === undefined ? undefined : promptText(prompt) }
-}
-
-function isHumanPrompt(entry: Entry): boolean {
-   if (entry.type !== "user" || entry.isMeta === true) return false
-   const origin = isRecord(entry.origin) ? entry.origin.kind : undefined
-   if (origin !== undefined) return origin === "human"
-   return contentBlocks(entry).every((b) => b.type !== "tool_result")
-}
-
-function promptText(entry: Entry): string {
-   const content = isRecord(entry.message) ? entry.message.content : undefined
-   return typeof content === "string" ? content : textBlocks(contentBlocks(entry))
+   return { live }
 }
 
 function newestChained(entries: readonly Line[]): number | undefined {
@@ -397,9 +391,9 @@ interface Started {
 class Subagents {
    readonly #byAgent = new Map<string, Started>()
    readonly #agentByCall = new Map<string, string>()
-   readonly #options: CcTrailOptions
+   readonly #options: CcViewOptions
 
-   constructor(entries: readonly Line[], options: CcTrailOptions) {
+   constructor(entries: readonly Line[], options: CcViewOptions) {
       this.#options = options
       const labels = new Map<string, string | undefined>()
       for (const { entry } of entries) {

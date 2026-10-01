@@ -1,7 +1,14 @@
 // private reasoning never enters a trail
 export type TrailItem =
    /** a human prompt inside the span, e.g. one the peer never received */
-   | { readonly kind: "prompt"; readonly text: string }
+   | {
+        readonly kind: "prompt"
+        readonly text: string
+        /** typed in this side's own client, not shared with the peer */
+        readonly direct?: true
+     }
+   /** where an answer to shared human messages starts */
+   | { readonly kind: "turn"; readonly prompts: readonly string[] }
    | { readonly kind: "text"; readonly text: string }
    | {
         readonly kind: "call"
@@ -40,8 +47,6 @@ export type TrailItem =
         /** a short notice that a fuller report elsewhere in the span supersedes */
         readonly notice?: true
      }
-   /** the human rewound the conversation; turns the receiver saw from `withdrawn` on no longer stand */
-   | { readonly kind: "rewind"; readonly withdrawn?: string }
    /** the turn stopped early */
    | {
         readonly kind: "halt"

@@ -11,7 +11,6 @@ const tool = (text: string, compact?: string): Segment =>
 const pkg = (...segments: Segment[]): PeerPackage => ({
    segments,
    interactions: [],
-   memory: { reads: [] },
 })
 const fullPath = ".spiderman/peer/full.txt"
 
