@@ -11,15 +11,42 @@ import spiderman from "./extension.ts"
 type Handler = (event: unknown, ctx: unknown) => unknown
 
 /** The slice of pi's API the extension uses, recorded. */
-function fakePi(cwd: string, provider = "openai-codex") {
+function fakePi(
+   cwd: string,
+   provider = "openai-codex",
+   flagValues: Record<string, string> = { "spiderman-strategy": "off" },
+) {
    const handlers = new Map<string, Handler>()
-   const flags = new Map<string, string>([["spiderman-strategy", "off"]])
+   const flags = new Map<string, string>(Object.entries(flagValues))
+   const elisions: { model: string; options: Record<string, unknown> }[] = []
+   const catalog = new Map([
+      ["openai-codex/gpt-6-sol", { provider: "openai-codex", id: "gpt-6-sol" }],
+      ["openai/gpt-6-sol", { provider: "openai", id: "gpt-6-sol" }],
+   ])
    const sent: string[] = []
    const notices: string[] = []
    const branch: { type: string; id: string; message?: unknown }[] = []
    const ctx = {
       cwd,
-      model: { provider },
+      model: { provider, id: "gpt-6-astra" },
+      thinkingLevel: "high",
+      modelRegistry: {
+         find: (p: string, id: string) => catalog.get(`${p}/${id}`),
+         streamSimple(
+            model: { provider: string; id: string },
+            _context: unknown,
+            options: Record<string, unknown>,
+         ) {
+            elisions.push({ model: `${model.provider}/${model.id}`, options })
+            return {
+               result: async () => ({
+                  content: [{ type: "text", text: "1" }],
+                  stopReason: "stop",
+                  usage: {},
+               }),
+            }
+         },
+      },
       isIdle: () => true,
       ui: { notify: (message: string) => void notices.push(message) },
       sessionManager: {
@@ -40,7 +67,7 @@ function fakePi(cwd: string, provider = "openai-codex") {
    spiderman(pi as unknown as ExtensionAPI)
    const emit = (event: string, payload: unknown = {}) =>
       handlers.get(event)?.(payload, ctx)
-   return { emit, sent, notices, branch }
+   return { emit, sent, notices, branch, elisions }
 }
 
 async function post(cwd: string, body: unknown): Promise<HookReply> {
@@ -156,4 +183,72 @@ test("/tree in B's pane is cancelled with a pointer to Claude Code", () => {
    const pi = fakePi("unused")
    assert.deepEqual(pi.emit("session_before_tree", {}), { cancel: true })
    assert.match(pi.notices[0] ?? "", /type in Claude Code/)
+})
+
+/** One relayed turn whose B answer is shown at Stop; returns what the human sees. */
+async function displayedTurn(pi: ReturnType<typeof fakePi>, cwd: string) {
+   await pi.emit("session_start", { reason: "startup" })
+   const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+   await post(cwd, {
+      kind: "prompt",
+      prompt: "U1",
+      promptId: "p1",
+      part: { index: 1, count: 1 },
+      ...common,
+   })
+   pi.emit("agent_start")
+   pi.branch.push({
+      type: "message",
+      id: "m1",
+      message: {
+         role: "assistant",
+         content: [{ type: "text", text: "B's answer." }],
+         stopReason: "stop",
+      },
+   })
+   pi.emit("agent_settled")
+   const shown = await post(cwd, {
+      kind: "stop",
+      lastAssistantMessage: "A's answer.",
+      promptId: "p1",
+      part: { index: 1, count: 1 },
+      ...common,
+   })
+   return shown.systemMessage ?? ""
+}
+
+test("the mediator is B's own model at B's thinking level by default", async () => {
+   const cwd = mkdtempSync(join(tmpdir(), "spiderman-ext-"))
+   const pi = fakePi(cwd, "openai-codex", {})
+   try {
+      assert.match(await displayedTurn(pi, cwd), /\[elided: "B's answer\."\]$/)
+      assert.deepEqual(
+         pi.elisions.map((e) => [e.model, e.options.reasoning]),
+         [["openai-codex/gpt-6-astra", "high"]],
+      )
+   } finally {
+      await pi.emit("session_shutdown", { reason: "quit" })
+      rmSync(cwd, { recursive: true, force: true })
+   }
+})
+
+test("a mediator override resolves exactly and stays inside the provider allowlist", async () => {
+   for (const [spec, called, shown] of [
+      ["openai-codex/gpt-6-sol", ["openai-codex/gpt-6-sol"], /elided/],
+      ["openai/gpt-6-sol", [], /mediator provider openai is not one of openai-codex/],
+      ["gpt-6-sol", [], /mediator model gpt-6-sol not found/],
+   ] as const) {
+      const cwd = mkdtempSync(join(tmpdir(), "spiderman-ext-"))
+      const pi = fakePi(cwd, "openai-codex", { "spiderman-mediator": spec })
+      try {
+         assert.match(await displayedTurn(pi, cwd), shown)
+         assert.deepEqual(
+            pi.elisions.map((e) => e.model),
+            called,
+         )
+      } finally {
+         await pi.emit("session_shutdown", { reason: "quit" })
+         rmSync(cwd, { recursive: true, force: true })
+      }
+   }
 })

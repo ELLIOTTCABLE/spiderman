@@ -30,8 +30,8 @@ const FLAGS = {
    },
    mediator: {
       name: "spiderman-mediator",
-      default: "openai-codex/gpt-6-luna",
-      help: "elision model, provider/id, matched exactly",
+      default: "",
+      help: "mediator model, provider/id, matched exactly; default: B's own model and thinking level",
    },
    providers: {
       name: "spiderman-providers",
@@ -181,7 +181,7 @@ export default function spiderman(pi: ExtensionAPI): void {
          b,
          ...(flag("strategy") === "off"
             ? {}
-            : { mediate: mediator(live, flag("mediator"), log) }),
+            : { mediate: mediator(live, flag("mediator"), providers, log) }),
          log,
          config: {
             ...defaultTurnConfig,
@@ -251,33 +251,51 @@ export default function spiderman(pi: ExtensionAPI): void {
 function mediator(
    ctx: () => ExtensionContext,
    spec: string,
+   providers: readonly string[],
    log: (entry: Record<string, unknown>) => void,
 ): (aText: string, bText: string) => Promise<string> {
    const slash = spec.indexOf("/")
-   const provider = spec.slice(0, slash)
-   const id = spec.slice(slash + 1)
    return async (aText, bText) => {
       const c = ctx()
       // exact lookup only: pi's fuzzy fallback can land on a pay-as-you-go provider
-      const model = slash > 0 ? c.modelRegistry.find(provider, id) : undefined
-      if (model === undefined) throw new Error(`mediator model ${spec} not found`)
-      const response = await c.modelRegistry.complete(
-         model,
-         {
-            systemPrompt: MEDIATOR_SYSTEM_PROMPT,
-            messages: [
-               {
-                  role: "user",
-                  content: [{ type: "text", text: mediatorInput(aText, bText) }],
-                  timestamp: Date.now(),
-               },
-            ],
-         },
-         { signal: AbortSignal.timeout(ELISION_TIMEOUT_MS) },
-      )
+      const model =
+         spec === ""
+            ? c.model
+            : slash > 0
+              ? c.modelRegistry.find(spec.slice(0, slash), spec.slice(slash + 1))
+              : undefined
+      if (model === undefined)
+         throw new Error(`mediator model ${spec || "(B's)"} not found`)
+      if (!providers.includes(model.provider))
+         throw new Error(
+            `mediator provider ${model.provider} is not one of ${providers.join(", ")}`,
+         )
+      const thinking = c.thinkingLevel
+      const response = await c.modelRegistry
+         .streamSimple(
+            model,
+            {
+               systemPrompt: MEDIATOR_SYSTEM_PROMPT,
+               messages: [
+                  {
+                     role: "user",
+                     content: [{ type: "text", text: mediatorInput(aText, bText) }],
+                     timestamp: Date.now(),
+                  },
+               ],
+            },
+            {
+               ...(thinking === undefined || thinking === "off"
+                  ? {}
+                  : { reasoning: thinking }),
+               signal: AbortSignal.timeout(ELISION_TIMEOUT_MS),
+            },
+         )
+         .result()
       log({
          what: "mediator",
-         model: spec,
+         model: `${model.provider}/${model.id}`,
+         thinking,
          usage: response.usage,
          stopReason: response.stopReason,
          at: Date.now(),
