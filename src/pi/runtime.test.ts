@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { HookRequest } from "../core/protocol.ts"
+import { sha256Hex } from "../core/store.ts"
 import { defaultTurnConfig } from "../core/turns.ts"
 import { type BSide, Runtime, type RuntimeDeps, type RuntimeFs } from "./runtime.ts"
 
@@ -45,9 +46,10 @@ function harness(options: { mediate?: RuntimeDeps["mediate"]; refuse?: number } 
             timer.live = false
          }
       },
-      hash: (text) => `h${text.length}`,
+      hash: sha256Hex,
       fs,
       projectDir: "P",
+      sessionId: "s1",
       b,
       ...(options.mediate === undefined ? {} : { mediate: options.mediate }),
       log: () => {},
@@ -141,9 +143,12 @@ test("a full turn: standing context, B in parallel, elided display, then deliver
    assert.deepEqual(asked, [["A says X.", "B says X.\n\nB also says Y."]])
    assert.equal(
       display.systemMessage,
-      "[peer 1/1]\n[peer answer] full text: .spiderman/turns/b-1.md\n\n[1¶ elided]\n\nB also says Y.",
+      "[peer 1/1]\n[peer answer] full text: .spiderman/turns/s1/b-1.md\n\n[1¶ elided]\n\nB also says Y.",
    )
-   assert.equal(h.files.get("P/.spiderman/turns/b-1.md"), "B says X.\n\nB also says Y.")
+   assert.equal(
+      h.files.get("P/.spiderman/turns/s1/b-1.md"),
+      "B says X.\n\nB also says Y.",
+   )
 
    h.transcript(userEntry("U2", "p2"))
    const part1 = h.runtime.handle(prompt("U2", "p2", 1))
@@ -216,4 +221,88 @@ test("dispose answers every waiting hook, so none hangs until its timeout", asyn
    const waiting = h.runtime.handle(stop("p1", "A"))
    h.runtime.dispose()
    assert.deepEqual(await waiting, {})
+})
+
+test("B1 repro: mid-turn prompt, solo turn, then a normal prompt never repeats A's earlier answer to B", async () => {
+   const h = harness()
+   h.transcript(userEntry("U3a", "p3a"))
+   await h.runtime.handle(prompt("U3a", "p3a"))
+   h.runtime.bStarted()
+   h.scripted.set(1, bReply("B3a."))
+   h.runtime.bSettled()
+
+   h.transcript(aText("Looking.", "a3a-1"))
+   await h.runtime.handle(prompt("U3b", "p3a"))
+   // Stop arrives before A's final text reaches the transcript
+   await h.runtime.handle(stop("p3a", "A3a final."))
+   assert.match(
+      h.sent[1] ?? "",
+      /Looking\.[\s\S]*A3a final\.[\s\S]*\[the human's message\]\nU3b$/,
+   )
+   h.runtime.bStarted()
+   h.scripted.set(2, bReply("B3b."))
+   h.runtime.bSettled()
+
+   h.transcript(
+      aText("A3a final.", "a3a-2"),
+      userEntry("U3b", "p3b"),
+      aText("A3b answer.", "a3b-1"),
+   )
+   await h.runtime.handle(stop("p3b", "A3b answer."))
+   h.transcript(userEntry("~solo", "p4"), aText("Solo answer.", "a4-1"))
+   await h.runtime.handle(prompt("~solo", "p4"))
+   await h.runtime.handle(stop("p4", "Solo answer."))
+   h.transcript(userEntry("U5", "p5"))
+   await h.runtime.handle(prompt("U5", "p5"))
+
+   const fifth = h.sent[2] ?? ""
+   assert.match(
+      fifth,
+      /A3b answer\.[\s\S]*~solo[\s\S]*Solo answer\.[\s\S]*\[the human's message\]\nU5$/,
+   )
+   assert.doesNotMatch(fifth, /Looking\.|A3a final\./)
+   assert.doesNotMatch(fifth, /U3b/)
+})
+
+test("a newly paired B gets A's last completed turn, not nothing and not everything", async () => {
+   const h = harness()
+   h.transcript(
+      userEntry("ancient question", "p0"),
+      aText("Ancient answer.", "a0"),
+      userEntry("U1", "p1"),
+      aText("A1 answer.", "a1"),
+      userEntry("U2", "p2"),
+   )
+   await h.runtime.handle(prompt("U2", "p2"))
+   const first = h.sent[0] ?? ""
+   assert.match(
+      first,
+      /\[the human's prompt to the peer\]\nU1[\s\S]*A1 answer\.[\s\S]*\[the human's message\]\nU2$/,
+   )
+   assert.doesNotMatch(first, /ancient|Ancient/)
+})
+
+test("several B answers reaching A at once are sectioned by the prompt each answered", async () => {
+   const h = harness()
+   h.transcript(userEntry("U1", "p1"))
+   await h.runtime.handle(prompt("U1", "p1"))
+   h.runtime.bStarted()
+   h.transcript(userEntry("U2", "p2"))
+   const capped = h.runtime.handle(prompt("U2", "p2"))
+   await h.advance(1_000)
+   assert.deepEqual(await capped, {
+      systemMessage:
+         "spiderman: the peer is still answering; its answer reaches Claude with your next prompt.",
+   })
+   h.scripted.set(1, bReply("Answer to one."))
+   h.runtime.bSettled()
+   h.runtime.bStarted()
+   h.scripted.set(2, bReply("Answer to two."))
+   h.runtime.bSettled()
+   h.transcript(userEntry("U3", "p3"))
+   const delivered = (await h.runtime.handle(prompt("U3", "p3"))).additionalContext ?? ""
+   assert.match(
+      delivered,
+      /\[peer answer 1 of 2, to the human's message "U1"\]\n\nAnswer to one\.\n\n\[peer answer 2 of 2, to the human's message "U2"\]\n\nAnswer to two\./,
+   )
 })

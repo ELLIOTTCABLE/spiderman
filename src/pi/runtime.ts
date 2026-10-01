@@ -6,12 +6,21 @@ import {
    bOutcome,
    dedupeKey,
    displayChunks,
-   lastUuid,
+   lastMessageUuid,
+   lastTurnStart,
+   promptKey,
    reconcileWithLast,
+   sectioned,
+   withoutDelivered,
 } from "../core/bridge.ts"
 import { type Cursor, ccTrail } from "../core/cc-trail.ts"
 import { CHUNK_CHARS, chunkPackage } from "../core/chunk.ts"
-import { formatPeerPackage, type PackageEnv, packageText } from "../core/package.ts"
+import {
+   formatPeerPackage,
+   type PackageEnv,
+   type PackageMemory,
+   packageText,
+} from "../core/package.ts"
 import { piTrail } from "../core/pi-trail.ts"
 import { type HookReply, type HookRequest, STATE_DIR } from "../core/protocol.ts"
 import { renderElided } from "../core/render.ts"
@@ -57,6 +66,8 @@ export interface RuntimeDeps {
    readonly hash: (text: string) => string
    readonly fs: RuntimeFs
    readonly projectDir: string
+   /** pi's session id: names turn files, so a new session never overwrites an old one */
+   readonly sessionId: string
    readonly b: BSide
    /** elision mediator; absent means strategy "off" (B shown in full) */
    readonly mediate?: (aText: string, bText: string) => Promise<string>
@@ -68,6 +79,8 @@ interface BTurnData {
    readonly leaf: string | undefined
    readonly messages?: readonly unknown[]
    readonly outcome?: BOutcome
+   /** the human messages this turn answered */
+   readonly prompts?: readonly string[]
 }
 
 /** The effectful shell around the turn reducer: hook requests in, B turns and replies out. */
@@ -85,6 +98,11 @@ export class Runtime {
    #aSession: string | undefined
    #aTranscript: string | undefined
    #aCut: Cursor | undefined
+   /** per receiver: files it was already pointed at */
+   #toA: PackageMemory | undefined
+   #toB: PackageMemory | undefined
+   /** keys of A's trail items and the human messages B already has */
+   #deliveredToB = new Set<string>()
    #bRunning: { turn: number; started: boolean } | undefined
    #cancelWake: (() => void) | undefined
    #nextId = 0
@@ -116,7 +134,7 @@ export class Runtime {
       const data = this.#turns.get(running.turn)
       const messages = this.#deps.b.messagesSince(data?.leaf)
       const outcome = bOutcome(messages)
-      this.#turns.set(running.turn, { leaf: data?.leaf, messages, outcome })
+      this.#turns.set(running.turn, { ...data, leaf: data?.leaf, messages, outcome })
       this.#dispatch({ type: "bSettled", turn: running.turn, outcome })
    }
 
@@ -270,13 +288,19 @@ export class Runtime {
       const key = `${turns.join(",")}/${count}`
       const cached = this.#deliveries.get(key)
       if (cached !== undefined) return cached
-      const messages = turns.flatMap((t) => this.#turns.get(t)?.messages ?? [])
-      const trail = piTrail(messages)
-      // an empty peer block still costs A tokens on every later request
-      if (trail.items.length === 0 && trail.issues.length === 0) return []
-      const pkg = formatPeerPackage(trail, this.#packageEnv())
+      const sections = turns.flatMap((turn) => {
+         const data = this.#turns.get(turn)
+         const trail = piTrail(data?.messages ?? [])
+         // an empty peer block still costs A tokens on every later request
+         if (trail.items.length === 0 && trail.issues.length === 0) return []
+         const pkg = formatPeerPackage(trail, this.#packageEnv(), this.#toA)
+         this.#toA = pkg.memory
+         return [{ pkg, prompt: (data?.prompts ?? []).join(" / ") }]
+      })
+      if (sections.length === 0) return []
+      const pkg = sectioned(sections)
       const fullPath = this.#writeState(
-         `turns/b-${turns.join("-")}.package.md`,
+         `turns/${this.#deps.sessionId}/b-${turns.join("-")}.package.md`,
          packageText(pkg),
       )
       const chunks = chunkPackage(pkg, {
@@ -299,7 +323,10 @@ export class Runtime {
    async #makeDisplay(turn: number, count: number, aText: string): Promise<string[]> {
       const data = this.#turns.get(turn)
       const bText = bAnswerText(data?.messages ?? [])
-      const fullPath = this.#writeState(`turns/b-${turn}.md`, bText)
+      const fullPath = this.#writeState(
+         `turns/${this.#deps.sessionId}/b-${turn}.md`,
+         bText,
+      )
       let parse: AnchorParse = { kind: "ok", anchors: [] }
       const started = this.#deps.now()
       if (this.#deps.mediate !== undefined && bText.trim() !== "") {
@@ -333,43 +360,51 @@ export class Runtime {
    }
 
    #startB(effect: Extract<TurnEffect, { type: "startB" }>) {
-      const { fs, b, config } = this.#deps
+      const { fs, b, config, hash } = this.#deps
       const transcriptPath = this.#aTranscript
       const transcript =
          transcriptPath === undefined ? undefined : fs.readText(transcriptPath)
+      const until = effect.until === "end" ? undefined : effect.until
+      // committed only once B accepts the message: a refused start is retried from the same place
+      const delivered = new Set(this.#deliveredToB)
+      let toB = this.#toB
+      let cut: Cursor | undefined = this.#aCut ?? until
       let aPackage: string | undefined
-      // with no cut yet (first B turn after pairing), A's earlier history isn't news to B
-      if (
-         transcript !== undefined &&
-         transcriptPath !== undefined &&
-         this.#aCut !== undefined
-      ) {
-         const span =
-            effect.until === "end"
-               ? { after: this.#aCut }
-               : { after: this.#aCut, until: effect.until }
-         const sliced = ccTrail(transcript, span, {
-            transcriptPath,
-            exists: (p) => fs.exists(p),
-         })
-         const trail =
-            effect.until === "end"
-               ? reconcileWithLast(sliced, effect.lastAssistantMessage)
-               : sliced
-         if (trail.issues.length > 0)
-            this.#deps.log({
-               what: "aTrailIssues",
-               issues: trail.issues,
-               at: this.#deps.now(),
+
+      if (transcript !== undefined && transcriptPath !== undefined) {
+         // first B turn after pairing: A's last completed turn, not its whole history
+         const after = this.#aCut ?? lastTurnStart(transcript, until?.promptId)
+         if (after !== undefined) {
+            const span = {
+               ...(after === "top" ? {} : { after }),
+               ...(until === undefined ? {} : { until }),
+            }
+            const sliced = ccTrail(transcript, span, {
+               transcriptPath,
+               exists: (p) => fs.exists(p),
             })
-         if (trail.items.length > 0)
-            aPackage = packageText(formatPeerPackage(trail, this.#packageEnv()))
+            const whole =
+               until === undefined
+                  ? reconcileWithLast(sliced, effect.lastAssistantMessage)
+                  : sliced
+            const trail = withoutDelivered(whole, delivered, hash)
+            if (trail.issues.length > 0) {
+               this.#deps.log({
+                  what: "aTrailIssues",
+                  issues: trail.issues,
+                  at: this.#deps.now(),
+               })
+            }
+            if (trail.items.length > 0) {
+               const pkg = formatPeerPackage(trail, this.#packageEnv(), toB)
+               toB = pkg.memory
+               aPackage = packageText(pkg)
+            }
+         }
+         const uuid = lastMessageUuid(transcript)
+         cut = until ?? (uuid === undefined ? cut : { uuid })
       }
-      if (effect.until !== "end") this.#aCut = effect.until
-      else if (transcript !== undefined) {
-         const uuid = lastUuid(transcript)
-         if (uuid !== undefined) this.#aCut = { uuid }
-      }
+      for (const prompt of effect.prompts) delivered.add(promptKey(prompt, hash))
 
       const leaf = b.leafId()
       const sent = b.send(bMessage(aPackage, effect.prompts))
@@ -386,7 +421,10 @@ export class Runtime {
          )
          return
       }
-      this.#turns.set(effect.turn, { leaf })
+      this.#aCut = cut
+      this.#toB = toB
+      this.#deliveredToB = delivered
+      this.#turns.set(effect.turn, { leaf, prompts: effect.prompts })
       this.#bRunning = { turn: effect.turn, started: false }
       this.#deps.setTimer(config.startTimeoutMs, () => {
          if (this.#bRunning?.turn !== effect.turn || this.#bRunning.started) return
@@ -400,6 +438,7 @@ export class Runtime {
       const store = peerStore(this.#stateDir, fs, hash)
       return {
          refer: (text) => relativeState(store.put(text), this.#stateDir),
+         cwd: projectDir,
          readFile: (path) =>
             fs.readText(isAbsolute(path) ? path : join(projectDir, path)),
       }
