@@ -390,3 +390,45 @@ test("an unknown strategy turns elision off, with a notice", async () => {
       rmSync(cwd, { recursive: true, force: true })
    }
 })
+
+test("a rewind that runs after B has moved on navigates nowhere", async () => {
+   const cwd = mkdtempSync(join(tmpdir(), "spiderman-ext-"))
+   const pi = fakePi(cwd, "openai-codex", { "spiderman-strategy": "bx" })
+   try {
+      await pi.emit("session_start", { reason: "startup" })
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+      await post(cwd, {
+         kind: "prompt",
+         prompt: "U1",
+         promptId: "p1",
+         part: { index: 1, count: 1 },
+         ...common,
+      })
+      pi.emit("agent_start")
+      pi.branch.push(assistant("m1", "Only B says this."))
+      pi.emit("agent_settled")
+      const shown = post(cwd, {
+         kind: "stop",
+         lastAssistantMessage: "A's answer.",
+         promptId: "p1",
+         part: { index: 1, count: 1 },
+         ...common,
+      })
+      await until(() => pi.sent.length === 2)
+      pi.emit("agent_start")
+      pi.branch.push(assistant("bx-a", "none"))
+      pi.emit("agent_settled")
+      pi.branch.push(assistant("later", "a turn B took meanwhile"))
+      await shown
+      const log = join(cwd, ".spiderman", "log.jsonl")
+      await until(() => readFileSync(log, "utf8").includes('"what":"bx"'))
+      assert.match(readFileSync(log, "utf8"), /"rewind":"B moved on"/)
+      assert.deepEqual(
+         pi.branch.map((e) => e.id),
+         ["m1", "bx-a", "later"],
+      )
+   } finally {
+      await pi.emit("session_shutdown", { reason: "quit" })
+      rmSync(cwd, { recursive: true, force: true })
+   }
+})

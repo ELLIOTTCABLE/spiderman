@@ -20,13 +20,7 @@ import { STANDING_FOR_B } from "../core/standing.ts"
 import { sha256Hex } from "../core/store.ts"
 import { defaultTurnConfig } from "../core/turns.ts"
 import { type PeerFileFs, removePeerFile, writePeerFile } from "./peer-file.ts"
-import {
-   type BSide,
-   type Elision,
-   type Outcome,
-   Runtime,
-   type RuntimeFs,
-} from "./runtime.ts"
+import { type BSide, type Outcome, Runtime, type RuntimeFs } from "./runtime.ts"
 import { type HookServer, startHookServer } from "./server.ts"
 
 const FLAGS = {
@@ -62,7 +56,10 @@ const FLAGS = {
    },
 } as const
 
-const STRATEGIES: readonly string[] = ["mediator", "bx", "off"]
+const STRATEGIES = ["mediator", "bx", "off"] as const
+type Strategy = (typeof STRATEGIES)[number]
+const isStrategy = (value: string): value is Strategy =>
+   (STRATEGIES as readonly string[]).includes(value)
 const REWIND_COMMAND = "spiderman-rewind"
 const REWIND_ENTRY = "spiderman-rewind"
 
@@ -113,7 +110,13 @@ export default function spiderman(pi: ExtensionAPI): void {
 
    let session: Session | undefined
    let rewinding:
-      | { nonce: string; target: string; resolve: (outcome: Outcome) => void }
+      | {
+           nonce: string
+           /** B's leaf when the rewind was asked for: the tip of the elision exchange */
+           from: string | null
+           target: string
+           resolve: (outcome: Outcome) => void
+        }
       | undefined
    /** the one tree navigation the /tree guard lets through: our own rewind */
    let treeTarget: string | undefined
@@ -130,13 +133,15 @@ export default function spiderman(pi: ExtensionAPI): void {
             return
          }
          rewinding = undefined
-         const from = ctx.sessionManager.getLeafId()
+         // a late run must never drop a turn that B took since
+         if (ctx.sessionManager.getLeafId() !== pending.from)
+            return pending.resolve({ ok: false, reason: "B moved on" })
          treeTarget = pending.target
          try {
             const { cancelled } = await ctx.navigateTree(pending.target)
             if (cancelled) return pending.resolve({ ok: false, reason: "cancelled" })
             // pi keeps the leaf in memory only; a reload resumes at the file's last entry
-            pi.appendEntry(REWIND_ENTRY, { from, to: pending.target })
+            pi.appendEntry(REWIND_ENTRY, { from: pending.from, to: pending.target })
             pending.resolve({ ok: true })
          } catch (error) {
             pending.resolve({
@@ -176,10 +181,11 @@ export default function spiderman(pi: ExtensionAPI): void {
          } catch {}
       }
       const live = () => session?.ctx ?? ctx
-      const strategy = STRATEGIES.includes(flag("strategy")) ? flag("strategy") : "off"
-      if (strategy !== flag("strategy")) {
+      const asked = flag("strategy")
+      const strategy = isStrategy(asked) ? asked : "off"
+      if (strategy !== asked) {
          ctx.ui.notify(
-            `spiderman: unknown --spiderman-strategy ${flag("strategy")}; elision is off.`,
+            `spiderman: unknown --spiderman-strategy ${asked}; elision is off.`,
             "warning",
          )
       }
@@ -215,7 +221,8 @@ export default function spiderman(pi: ExtensionAPI): void {
             return new Promise((resolve) => {
                rewinding?.resolve({ ok: false, reason: "superseded" })
                const nonce = randomUUID()
-               rewinding = { nonce, target: entryId, resolve }
+               const from = live().sessionManager.getLeafId()
+               rewinding = { nonce, from, target: entryId, resolve }
                // tree navigation is command-only; from agent_settled, pi runs this after the settle
                pi.sendUserMessage(`/${REWIND_COMMAND} ${nonce}`, {
                   expandPromptTemplates: true,
@@ -259,7 +266,7 @@ export default function spiderman(pi: ExtensionAPI): void {
          elision:
             strategy === "mediator"
                ? { strategy, mediate: mediator(live, flag("mediator"), providers, log) }
-               : ({ strategy } as Elision),
+               : { strategy },
          log,
          config: {
             ...defaultTurnConfig,
