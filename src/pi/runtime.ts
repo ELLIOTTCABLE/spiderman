@@ -337,12 +337,13 @@ export class Runtime {
             parse = { kind: "unparseable", reason: `mediator failed: ${String(error)}` }
          }
       }
-      const rendered = renderElided(bText, parse)
+      const { text: rendered, vetoed } = renderElided(bText, parse, aText)
       this.#deps.log({
          what: "display",
          turn,
          bChars: bText.length,
          shownChars: rendered.length,
+         vetoed,
          anchors: parse.kind === "ok" ? parse.anchors : parse.reason,
          mediatorMs: this.#deps.now() - started,
          at: this.#deps.now(),

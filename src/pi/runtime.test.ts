@@ -143,7 +143,7 @@ test("a full turn: standing context, B in parallel, elided display, then deliver
    assert.deepEqual(asked, [["A says X.", "B says X.\n\nB also says Y."]])
    assert.equal(
       display.systemMessage,
-      "[peer 1/1]\n[peer answer] full text: .spiderman/turns/s1/b-1.md\n\n[1¶ elided]\n\nB also says Y.",
+      '[peer 1/1]\n[peer answer] full text: .spiderman/turns/s1/b-1.md\n\n[elided: "B says X."]\n\nB also says Y.',
    )
    assert.equal(
       h.files.get("P/.spiderman/turns/s1/b-1.md"),
