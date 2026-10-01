@@ -23,8 +23,8 @@ U_N typed in Claude Code (A)
      A-package(A's transcript since last delivered to B) + U_N ──▶ one user message in B's session (B's turn N)
 A_N ∥ B_N
 A's Stop hook → extension: last_assistant_message = A_N
-     wait for B_N to settle (capped) → elision mediator(A_N, B_N) → anchors
-     ──▶ rendered B_N (elided runs as "[n¶ elided]") as a display-only systemMessage under A_N
+     wait for B_N to settle (capped) → elider(A_N, B_N) → paragraph numbers → veto
+     ──▶ rendered B_N (each elided paragraph as `[elided: "first words…"]`) as a display-only systemMessage under A_N
 human reads A_N + elided B_N, types U_{N+1}
 ```
 - Neither model sees the other's current-turn answer before producing its own. Each receives the other's previous answer together with the human's next prompt.
@@ -59,17 +59,25 @@ human reads A_N + elided B_N, types U_{N+1}
   - A's answer is fully visible before Stop hooks return; the spinner reads "running Stop hooks… i/K".
   - The Stop cap is configurable (default ~5 min). On cap, show "peer still answering; its answer reaches A with your next prompt".
 
-### dec-mediator-replaces-bx
-- The report's Bx step (B elides its own answer in an extra turn of B's session) costs a cached read of B's whole, growing context on an expensive model, once per human turn. That violates the token-economy remit.
-- Default replacement: a stateless mediator call with input A_N + B_N and the Bx instruction, on a cheap model (default `openai-codex/gpt-6-luna`, configurable). It returns the same anchor format, with the same fail-safe.
-- It runs inside the pi extension using pi's own auth, so no auth files are read.
-- Side effect: this removes self-elision's sycophancy bias, which the report expected to cause over-elision.
-- Bx stays a selectable strategy (`bx | mediator | off`) for comparison. Human to review.
+### Elision strategies (human's directives, 2026-10-01; supersede dec-mediator-replaces-bx)
+- `--spiderman-strategy mediator | bx | off`, default `mediator`.
+- **mediator:** a stateless single-message call with A's final answer and B's answer, numbered `[¶k]`. Default model: B's own (`ctx.model`) at B's thinking level, via `modelRegistry.streamSimple`. `--spiderman-mediator provider/id` overrides, by exact `find` only. Either way the provider must be on `--spiderman-providers`.
+- **bx:** B decides, in a real turn of its own session with full history. The extra turn is accepted by the human for this mode. Its prompt carries A's final text (not the package) and a one-line index of B's blocks, `k: "first six words…"`. Afterwards B's leaf is moved back to the entry before the Bx prompt, so the exchange leaves B's context; A's answer still reaches B with the next prompt as a normal package.
+- Both answer with one line: `none` or comma-separated paragraph numbers. Paragraph = our `blocks.ts` split. The conservative criteria text is shared, byte-identical, by both prompts.
+- Parsing (`parseIndices`): only a line that is wholly a list, or `none`, counts, after stripping fences, decoration and a `label:`. Digits inside prose never count. Two different answer lines, or none, are unparseable: B shown in full, flagged. Out-of-range and repeated numbers are ignored; out-of-range ones are named in a header.
+- The keep-only veto and the previews apply to both. The anchor format is gone.
 
-### Elision (from report §2.4, unchanged in substance)
-- Output from the mediator: `{"elide": [<first ~8 words of each elided paragraph, verbatim>]}`.
-- Paragraph split respects code fences, lists, and tables.
-- Matching normalises the text first. An unmatched or malformed anchor keeps its paragraph. Unparseable output shows B_N in full, flagged.
+### Bx and the rewind (verified in pi-src v0.99.1, 2026-10-01; +SURE by reading unless marked)
+- **Mechanism.** Tree navigation is command-only (`ExtensionCommandContext.navigateTree`, `types.ts:401-435`). The extension registers `/spiderman-rewind` and, from its `agent_settled` handler, calls `pi.sendUserMessage("/spiderman-rewind <nonce>", { expandPromptTemplates: true })`. The `sendUserMessage` doc comment names this as the way to dispatch extension commands (`types.ts:1675-1683`).
+  - Inside `agent_settled`, `prompt()` is deferred until the settle emission ends (`agent-session.ts:1883-1887, 1037-1058`). `_isAgentRunActive` is already false then, so `navigateTree`'s `isStreaming` check passes. No emit is nested, which is what the "can deadlock" warning is about.
+  - An extension command runs before `input` handlers, appends no message, and starts no run (`agent-session.ts:1892-1899, 2031-2054`). No visible user message, no turn, no `agent_settled`.
+  - `navigateTree(target)` with no `summarize` writes no `branch_summary`. For a target that isn't a user message or `custom_message`, it calls `sessionManager.branch(target)`, which only moves the in-memory leaf (`session-manager.ts:1579-1584`). Then it rebuilds `agent.state.messages` from the branch (`agent-session.ts:897-903, 4030-4040`). A user-message target would land on its parent and fill the editor, so Bx is skipped unless B's leaf is a plain entry.
+  - **The leaf isn't persisted**: on reload the leaf is the file's last entry (`session-manager.ts:1103-1112`). So after navigating, the extension appends a custom entry `spiderman-rewind {from, to}`. Custom entries never enter context (`session-manager.ts:435-466`).
+  - Our `session_before_tree` guard lets through only the target our own command set, for the duration of the call. The command does nothing without the current nonce, and nothing if B's leaf moved since the request.
+  - Codex WebSocket continuation (`previous_response_id`) is used only when the new input extends the last request plus response byte-for-byte (`openai-codex-responses.ts:1438-1478`). After a rewind it falls back to a full request, so the Bx exchange can't leak server-side; the prompt cache (`prompt_cache_key` = session id) should still cover the pre-Bx prefix. ~SUSPECT until the real check.
+- **State machine:** a display in bx mode starts Bx (`startBx`) when B's turn completed with text, A's text is non-empty, and B is free. B is busy until `bxDone`: queued human prompts wait, a Stop for one of them waits for its later B turn, and a Stop takes Bx before any pending B turn. Bx failure (refused, never started, errored, unparseable, 90 s timeout → `abort()`) shows B in full, flagged. The rewind happens whenever the Bx prompt was appended, and B is freed even if the rewind fails or hangs (15 s).
+- **Sidecar:** `display` has `strategy`, `indices`, `elided`, `vetoed`. `bx` has `outcome`, `reply`, `usage {input, cacheRead, output}`, `rewind` (`ok` or a reason), `bxMs`.
+- **Known edges:** auto-compaction during a Bx turn lands on the abandoned branch, so B may compact again later. In the TUI, each rewind re-renders the pi pane with "Navigated to selected point" (`interactive-mode.ts:1944-1961`, ~SUSPECT, not seen).
 
 ### Display surfaces
 - The human reads in Claude Code. A synchronous `Stop` hook's `systemMessage` is display-only and never sent to the model (+SURE docs).
@@ -235,7 +243,7 @@ human reads A_N + elided B_N, types U_{N+1}
 - `post-merge`, `b-cache`, `elide`: done and folded; see "Final state".
 
 ## Elision safety (2026-10-01 ~00:30)
-- Mediator check: 4 synthetic pairs on luna. One FALSE elision: it collapsed a paragraph with numbers A lacked, against its own prompt. Otherwise it caught most redundancy, and elided nothing where there was none.
+- Mediator check (anchor format, luna): 4 synthetic pairs. One FALSE elision: it collapsed a paragraph with numbers A lacked, against its own prompt. Otherwise it caught most redundancy, and elided nothing where there was none.
 - Response, landed:
   - a deterministic keep-only veto (`veto.ts`): a B block containing a number or code token that A's text lacks is never elided;
   - per-block previews `[elided: "first eight words…"]`, so the human can spot a wrong collapse;
@@ -269,8 +277,6 @@ human reads A_N + elided B_N, types U_{N+1}
 - **Machine:** memory got low late in the run (~4.6 GB free of 32 GB, with about 20 of the human's own `claude.exe` sessions open). Real-harness runs stopped there.
 
 ## Open questions for the human (defaults applied; none blocking)
-- `ask-bx-versus-mediator`: Bx replaced by a stateless mediator for token economy. Acceptable? Bx is unbuilt; `RuntimeDeps.mediate` is the seam.
-- `ask-mediator-model-quality`: luna is cheap, but made one false elision; the veto now catches that class. Keep luna, or move to a mid-tier model (`--spiderman-mediator openai-codex/gpt-6-sol`)?
 - `ask-phone-rendering-test`: 2-minute test of whether `Stop says:` blocks appear on claude.ai/code and the phone.
 - `ask-peer-frame-trim`: the ~280-char frame repeats per package (4–5% of size). Kept for prompt-injection robustness; trimmable.
 - `ask-hk-hook-install`: the hk pre-commit hook is configured but not installed. `hk run` hung for 120 s+ in a scratch repo without `hk.pkl`.
