@@ -164,10 +164,7 @@ function liveBranch(entries: readonly Line[], end: number): Branch {
    return { chain, live, parent }
 }
 
-/**
- * The human rewound the conversation past `start` if the path from it back to the live chain
- * holds turns. The fork is where that path meets the chain; `withdrawn` is the first prompt after it.
- */
+/** a rewind if the path from `start` back to the chain holds turns; `withdrawn` is its first prompt */
 function rewound(
    entries: readonly Line[],
    start: number,

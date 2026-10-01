@@ -21,8 +21,7 @@ export interface PeerStore {
    put(text: string): string
 }
 
-// every pointer is replayed in the receiver's context; 64 bits names a session's outputs without
-// a realistic collision, and a name taken by other content just grows
+// pointers are replayed in context; 64 bits suffices per session, and a taken name grows
 const SHORT_HASH = 16
 
 export function peerStore(root: string, fs: PeerStoreFs, hash: Hash): PeerStore {

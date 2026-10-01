@@ -478,7 +478,7 @@ function renderMessage(
 
 const PATH_KEYS: ReadonlySet<string> = new Set(["path", "file_path"])
 
-// both peers share the cwd; drive-letter paths compare case-insensitively, as Windows does
+// drive-letter paths compare case-insensitively, as Windows does
 function relativeToCwd(env: PackageEnv, path: string): string {
    if (env.cwd === undefined) return path
    const base = env.cwd.replaceAll("\\", "/").replace(/\/+$/, "")
