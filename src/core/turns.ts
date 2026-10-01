@@ -289,7 +289,12 @@ class Machine {
       const aIdle = !this.state.aRunning || fresh
       const human = isHumanPrompt(event.prompt, event.source)
       const solo = event.prompt.startsWith(this.#config.soloPrefix)
-      this.#log("submit", { aIdle, human, solo })
+      // unusual sources are logged so real use teaches us the vocabulary
+      const source =
+         event.source === undefined || event.source === "user"
+            ? {}
+            : { source: event.source }
+      this.#log("submit", { aIdle, human, solo, ...source })
 
       if (aIdle) {
          this.state = {

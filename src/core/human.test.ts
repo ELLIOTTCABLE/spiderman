@@ -7,10 +7,13 @@ test("typed prompts are human, with or without a source field", () => {
    assert.equal(isHumanPrompt("why is it slow?", undefined), true)
 })
 
-test("any other source is not the human", () => {
+test("only a system source marks a prompt as not the human", () => {
    assert.equal(isHumanPrompt("continue", "system"), false)
-   assert.equal(isHumanPrompt("check again", "loop_wakeup"), false)
-   assert.equal(isHumanPrompt("hi", "sdk"), false)
+   assert.equal(isHumanPrompt("hi", "sdk"), true)
+})
+
+test("an unknown source counts as human, so a real prompt is never dropped", () => {
+   assert.equal(isHumanPrompt("from my phone", "remote_control"), true)
 })
 
 test("machine-made turns are recognised by their envelope even without a source", () => {
