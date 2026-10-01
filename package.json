@@ -18,5 +18,8 @@
       "@earendil-works/pi-codemode": "0.99.1",
       "@earendil-works/pi-mcp": "0.99.1",
       "@earendil-works/pi-tui": "0.99.1"
+   },
+   "dependencies": {
+      "marked": "18.0.14"
    }
 }
