@@ -1,11 +1,24 @@
-import type { Trail, TrailItem, TrailResult } from "./trail.ts"
+import {
+   type Trail,
+   type TrailItem,
+   type TrailReport,
+   type TrailResult,
+   withoutSupersededNotices,
+} from "./trail.ts"
 import { isRecord } from "./validate.ts"
+
+interface Started {
+   readonly call: string
+   readonly label: string | undefined
+}
 
 // `unknown`: other extensions add message roles. User messages are skipped: in B's session each
 // is our own injection of A's package + the human's prompt, which A already has
 export function piTrail(messages: readonly unknown[]): Trail {
    const items: TrailItem[] = []
    const issues: string[] = []
+   const agents = new Map<string, Started>()
+   const becameReports = new Set<string>()
    messages.forEach((message, i) => {
       if (!isRecord(message) || typeof message.role !== "string") {
          issues.push(`message ${i}: not a message`)
@@ -22,33 +35,152 @@ export function piTrail(messages: readonly unknown[]): Trail {
             if (item === undefined) issues.push(`message ${i} block ${j}: unreadable`)
             else items.push(item)
          })
+         const halt = halted(message)
+         if (halt !== undefined) items.push(halt)
       } else if (message.role === "toolResult") {
          const id = message.toolCallId
          if (typeof id !== "string" || !Array.isArray(message.content)) {
             issues.push(`message ${i}: unreadable tool result`)
             return
          }
+         const details = isRecord(message.details) ? message.details : {}
+         const blocks = message.content.filter(isRecord)
+         const images = blocks.filter((b) => b.type === "image").length
+         const text = (images > 0 ? blocks.filter((b) => b.type !== "image") : blocks)
+            .map(resultText)
+            .join("\n")
+
+         if (typeof details.agentId === "string" && details.status === "background") {
+            agents.set(details.agentId, {
+               call: id,
+               label:
+                  typeof details.description === "string"
+                     ? details.description
+                     : undefined,
+            })
+            items.push({ kind: "result", id, text: "", isError: false, background: true })
+            return
+         }
+         const report =
+            message.toolName === "get_subagent_result" && message.isError !== true
+               ? fetchedReport(text, agents)
+               : undefined
+         if (report !== undefined) {
+            becameReports.add(id)
+            items.push(report)
+            return
+         }
          const result: TrailResult = {
             kind: "result",
             id,
-            text: message.content.map(resultText).join("\n"),
+            text,
             isError: message.isError === true,
+            ...(images > 0
+               ? { media: images === 1 ? "1 image" : `${images} images` }
+               : {}),
          }
-         items.push(withSavedOutput(result, message.details))
+         items.push(withSavedOutput(result, details))
+      } else if (
+         message.role === "custom" &&
+         message.customType === "subagent-notification"
+      ) {
+         items.push(notification(message, agents))
       }
    })
-   return { items, issues }
+   const kept = items.filter(
+      (item) =>
+         item.kind !== "call" || item.id === undefined || !becameReports.has(item.id),
+   )
+   return { items: withoutSupersededNotices(kept), issues }
+}
+
+function halted(message: Record<string, unknown>): TrailItem | undefined {
+   if (message.stopReason === "aborted") return { kind: "halt", why: "aborted" }
+   if (message.stopReason !== "error") return undefined
+   return typeof message.errorMessage === "string" && message.errorMessage !== ""
+      ? { kind: "halt", why: "error", detail: message.errorMessage }
+      : { kind: "halt", why: "error" }
 }
 
 // pi's bash keeps only the tail in the result; the full output is in a temp file
-function withSavedOutput(result: TrailResult, details: unknown): TrailResult {
-   if (!isRecord(details) || typeof details.fullOutputPath !== "string") return result
+function withSavedOutput(
+   result: TrailResult,
+   details: Record<string, unknown>,
+): TrailResult {
+   if (typeof details.fullOutputPath !== "string") return result
    const path = details.fullOutputPath
    const total = isRecord(details.truncation) ? details.truncation.totalLines : undefined
    return {
       ...result,
       saved: typeof total === "number" ? { path, size: `${total} lines` } : { path },
    }
+}
+
+// pi-subagents: "Agent: <id>\nType: … | Status: <s> | …\nDescription: <d>\n\n<report>"
+function fetchedReport(
+   text: string,
+   agents: ReadonlyMap<string, Started>,
+): TrailReport | undefined {
+   const split = text.indexOf("\n\n")
+   const header = split === -1 ? text : text.slice(0, split)
+   const agent = /^Agent: (\S+)/.exec(header)?.[1]
+   if (agent === undefined) return undefined
+   const status = /\bStatus: ([^|\n]+)/.exec(header)?.[1]?.trim()
+   const started = agents.get(agent)
+   return {
+      kind: "report",
+      id: started?.call,
+      agent,
+      label: started?.label ?? /^Description: (.*)$/m.exec(header)?.[1]?.trim(),
+      text: split === -1 ? "" : text.slice(split + 2).trim(),
+      ...(status === undefined ? {} : { status }),
+   }
+}
+
+function notification(
+   message: Record<string, unknown>,
+   agents: ReadonlyMap<string, Started>,
+): TrailReport {
+   const content =
+      typeof message.content === "string"
+         ? message.content
+         : Array.isArray(message.content)
+           ? message.content.map(resultText).join("\n")
+           : ""
+   const details = isRecord(message.details) ? message.details : {}
+   const tag = (name: string) => {
+      const raw = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(content)?.[1]?.trim()
+      return raw === undefined ? undefined : unescapeXml(raw)
+   }
+   const agent =
+      tag("task-id") ?? (typeof details.id === "string" ? details.id : undefined)
+   const started = agent === undefined ? undefined : agents.get(agent)
+   const transcript =
+      /Full transcript available at: (.+)$/m.exec(content)?.[1]?.trim() ??
+      (typeof details.outputFile === "string" ? details.outputFile : undefined)
+   const status = tag("status")
+   return {
+      kind: "report",
+      id: tag("tool-use-id") ?? started?.call,
+      agent,
+      label:
+         started?.label ??
+         (typeof details.description === "string" ? details.description : tag("summary")),
+      text: tag("result") ?? "",
+      notice: true,
+      ...(status === undefined ? {} : { status }),
+      ...(transcript === undefined ? {} : { transcript }),
+   }
+}
+
+// pi-subagents escapes the report it wraps in tags
+function unescapeXml(text: string): string {
+   return text
+      .replaceAll("&lt;", "<")
+      .replaceAll("&gt;", ">")
+      .replaceAll("&quot;", '"')
+      .replaceAll("&apos;", "'")
+      .replaceAll("&amp;", "&")
 }
 
 function assistantBlock(block: unknown): TrailItem | "skip" | undefined {

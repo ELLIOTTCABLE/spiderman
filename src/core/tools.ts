@@ -6,6 +6,7 @@ export type ToolKind =
    | "edit"
    | "write"
    | "subagent"
+   | "message"
    | "remote"
    | "noise"
    | "generic"
@@ -79,6 +80,10 @@ const TOOLS: Readonly<Record<string, ToolSpec>> = {
    Write: kind("write"),
    Agent: kind("subagent"),
    Task: kind("subagent"),
+   SendMessage: kind("message"),
+   Skill: kind("search"),
+   Monitor: kind("search"),
+   TaskOutput: kind("search"),
    WebFetch: kind("remote"),
    WebSearch: kind("remote"),
    TodoWrite: kind("noise"),
@@ -88,6 +93,7 @@ const TOOLS: Readonly<Record<string, ToolSpec>> = {
    TaskList: kind("noise"),
    TaskGet: kind("noise"),
    ToolSearch: kind("noise"),
+   ListAgents: kind("noise"),
 
    read: read(plainView),
    grep: kind("search"),
@@ -98,6 +104,9 @@ const TOOLS: Readonly<Record<string, ToolSpec>> = {
    edit: kind("edit"),
    write: kind("write"),
    subagent: kind("subagent"),
+   steer_subagent: kind("message"),
+   get_subagent_result: kind("search"),
+   todo: kind("noise"),
 }
 
 export function classify(name: string): ToolSpec {

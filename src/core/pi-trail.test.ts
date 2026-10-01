@@ -70,7 +70,7 @@ test("thinking never reaches the trail", () => {
    assert.doesNotMatch(JSON.stringify(trail), /secret/)
 })
 
-test("image blocks in tool results are noted, text is joined", () => {
+test("image blocks in tool results become a media note; text is joined", () => {
    const trail = piTrail([
       {
          role: "toolResult",
@@ -86,7 +86,7 @@ test("image blocks in tool results are noted, text is joined", () => {
       },
    ])
    assert.deepEqual(trail.items, [
-      { kind: "result", id: "c", text: "before\n[image]\nafter", isError: true },
+      { kind: "result", id: "c", text: "before\nafter", isError: true, media: "1 image" },
    ])
 })
 
@@ -110,4 +110,131 @@ test("malformed messages and blocks are reported, not thrown", () => {
    ])
    assert.deepEqual(trail.items, [{ kind: "text", text: "ok" }])
    assert.equal(trail.issues.length, 3)
+})
+
+// pi-subagents, as observed
+const startAgent = [
+   assistant(
+      [
+         {
+            type: "toolCall",
+            id: "c1",
+            name: "Agent",
+            arguments: { description: "Map ledgers", prompt: "Map the ledgers." },
+         },
+      ],
+      "toolUse",
+   ),
+   {
+      role: "toolResult",
+      toolCallId: "c1",
+      toolName: "Agent",
+      content: [{ type: "text", text: "Agent started in background.\nAgent ID: a1" }],
+      details: { agentId: "a1", status: "background", description: "Map ledgers" },
+      isError: false,
+      timestamp: 1,
+   },
+]
+const notification = {
+   role: "custom",
+   customType: "subagent-notification",
+   content:
+      "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>c1</tool-use-id>\n" +
+      "<status>Done</status>\n<result>Two &lt;ledgers&gt; found.</result>\n" +
+      "</task-notification>\nFull transcript available at: T:/tasks/a1.output",
+   display: true,
+   details: { id: "a1", description: "Map ledgers", status: "completed" },
+   timestamp: 2,
+}
+const fetched = [
+   assistant(
+      [
+         {
+            type: "toolCall",
+            id: "c2",
+            name: "get_subagent_result",
+            arguments: { agent_id: "a1" },
+         },
+      ],
+      "toolUse",
+   ),
+   {
+      role: "toolResult",
+      toolCallId: "c2",
+      toolName: "get_subagent_result",
+      content: [
+         {
+            type: "text",
+            text:
+               "Agent: a1\nType: scout | Status: completed | Tool uses: 3\n" +
+               "Description: Map ledgers\n\n## Ledgers\n\nTwo found.",
+         },
+      ],
+      isError: false,
+      timestamp: 3,
+   },
+]
+
+test("a background subagent's notification is its report, unescaped and linked", () => {
+   const trail = piTrail([...startAgent, notification])
+   assert.deepEqual(trail.items.slice(1), [
+      { kind: "result", id: "c1", text: "", isError: false, background: true },
+      {
+         kind: "report",
+         id: "c1",
+         agent: "a1",
+         label: "Map ledgers",
+         text: "Two <ledgers> found.",
+         notice: true,
+         status: "Done",
+         transcript: "T:/tasks/a1.output",
+      },
+   ])
+})
+
+test("a fetched result becomes the report, replacing its call and the notice", () => {
+   const trail = piTrail([...startAgent, notification, ...fetched])
+   assert.deepEqual(
+      trail.items.map((i) => (i.kind === "call" ? `call ${i.name}` : i.kind)),
+      ["call Agent", "result", "report"],
+   )
+   assert.deepEqual(trail.items.at(-1), {
+      kind: "report",
+      id: "c1",
+      agent: "a1",
+      label: "Map ledgers",
+      text: "## Ledgers\n\nTwo found.",
+      status: "completed",
+   })
+})
+
+test("a fetch that is not a report stays an ordinary call and result", () => {
+   const trail = piTrail([
+      assistant(
+         [{ type: "toolCall", id: "c3", name: "get_subagent_result", arguments: {} }],
+         "toolUse",
+      ),
+      {
+         role: "toolResult",
+         toolCallId: "c3",
+         toolName: "get_subagent_result",
+         content: [{ type: "text", text: 'Agent not found: "zz".' }],
+         isError: false,
+         timestamp: 1,
+      },
+   ])
+   assert.deepEqual(
+      trail.items.map((i) => i.kind),
+      ["call", "result"],
+   )
+})
+
+test("a turn that ended in an error or an abort says so", () => {
+   const failed = { ...assistant([], "error"), errorMessage: "WebSocket closed 1012" }
+   const aborted = { ...assistant([{ type: "text", text: "Partial" }], "aborted") }
+   assert.deepEqual(piTrail([failed, aborted]).items, [
+      { kind: "halt", why: "error", detail: "WebSocket closed 1012" },
+      { kind: "text", text: "Partial" },
+      { kind: "halt", why: "aborted" },
+   ])
 })

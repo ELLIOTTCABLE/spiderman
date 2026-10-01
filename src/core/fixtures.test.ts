@@ -113,7 +113,11 @@ test("tool-heavy CC turn: the background subagent's report and transcript are at
       /\[tool\] subagent: List markdown files in current directory \(full prompt:/,
    )
    assert.ok(text.replaceAll("\\", "/").includes(`(transcript: ${transcript})`))
-   assert.match(text, /\[subagent report\]\ninventory\.md/)
+   assert.match(text, /→ running in the background\n/)
+   assert.match(
+      text,
+      /\[subagent report: List markdown files in current directory\] \(transcript: [^)]+\)\ninventory\.md/,
+   )
    assert.doesNotMatch(text, /Async agent launched/)
    assert.doesNotMatch(text, /task-notification/)
 })

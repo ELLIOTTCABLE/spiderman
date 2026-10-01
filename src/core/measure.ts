@@ -21,7 +21,7 @@ export function measurePackage(
    let rawChars = 0
    for (const item of trail.items) {
       if (item.kind === "call") rawChars += JSON.stringify(item.input ?? {}).length
-      else rawChars += item.text.length
+      else if (item.kind !== "halt") rawChars += item.text.length
    }
 
    const unreachable = pkg.interactions.flatMap((interaction) =>
@@ -30,7 +30,9 @@ export function measurePackage(
          .map((pointer) => ({ interaction, pointer })),
    )
 
-   const accounted = pkg.interactions.filter((i) => i.kind !== "orphan")
+   const accounted = pkg.interactions.filter(
+      (i) => i.kind !== "orphan" && i.kind !== "report",
+   )
    const calls = trail.items.flatMap((i) => (i.kind === "call" ? [i] : []))
    const unaccounted = calls
       .filter(

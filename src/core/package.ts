@@ -1,4 +1,5 @@
 import { splitBlocks } from "./blocks.ts"
+import { sha256Hex } from "./store.ts"
 import {
    classify,
    editHunks,
@@ -8,10 +9,11 @@ import {
    subagentBrief,
    type ToolKind,
 } from "./tools.ts"
-import type { Trail, TrailCall, TrailResult } from "./trail.ts"
+import type { Trail, TrailCall, TrailItem, TrailReport, TrailResult } from "./trail.ts"
+import { isRecord } from "./validate.ts"
 
 /** truncation priority, highest first (chunk.ts) */
-export type SegmentKind = "frame" | "prose" | "tool"
+export type SegmentKind = "frame" | "prompt" | "prose" | "report" | "tool"
 
 export interface Segment {
    readonly kind: SegmentKind
@@ -24,7 +26,8 @@ export interface Segment {
 export interface Interaction {
    readonly id: string | undefined
    readonly tool: string
-   readonly kind: ToolKind | "orphan"
+   /** "report" and "orphan" are not calls */
+   readonly kind: ToolKind | "report" | "orphan"
    /** paths the package points at for it; empty when everything is inline (or noise) */
    readonly pointers: readonly string[]
 }
@@ -32,6 +35,14 @@ export interface Interaction {
 export interface PeerPackage {
    readonly segments: readonly Segment[]
    readonly interactions: readonly Interaction[]
+   /** pass back as `prior` for this receiver's next package */
+   readonly memory: PackageMemory
+}
+
+/** one per receiver, carried package to package; plain JSON, opaque to callers */
+export interface PackageMemory {
+   /** [path, view fingerprint, pointer given], oldest first */
+   readonly reads: readonly (readonly [string, string, string])[]
 }
 
 export interface PackageEnv {
@@ -57,24 +68,30 @@ const GENERIC_INPUT_LIMIT = 300
 const INLINE_DIFF_LIMIT = 2_000
 const BRIEF_LIMIT = 160
 const REPORT_LIMIT = 1_500
+// bounds a long session's memory; older reads are simply shown again
+const MEMORY_READS = 1_000
 
 interface Rendered {
    readonly segments: readonly Segment[]
    readonly pointers: readonly string[]
 }
 
-export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
-   const callIds = new Set(
-      trail.items.flatMap((i) => (i.kind === "call" && i.id ? [i.id] : [])),
-   )
+export function formatPeerPackage(
+   trail: Trail,
+   env: PackageEnv,
+   prior?: PackageMemory,
+): PeerPackage {
+   const calls = new Map<string, TrailCall>()
+   for (const item of trail.items)
+      if (item.kind === "call" && item.id !== undefined) calls.set(item.id, item)
    const results = new Map<string, TrailResult>()
    for (const item of trail.items) {
-      if (item.kind === "result" && item.id !== undefined && callIds.has(item.id)) {
+      if (item.kind === "result" && item.id !== undefined && calls.has(item.id)) {
          results.set(item.id, item)
       }
    }
 
-   const reads = new ReadMemory()
+   const reads = new ReadMemory(prior)
    const segments: Segment[] = [{ kind: "frame", text: OPENING }]
    const interactions: Interaction[] = []
    if (trail.issues.length > 0) {
@@ -88,12 +105,14 @@ export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
    for (const item of trail.items) {
       if (item.kind === "prompt") {
          segments.push({
-            kind: "prose",
+            kind: "prompt",
             text: `[the human's prompt to the peer]\n${item.text}`,
          })
       } else if (item.kind === "text") {
          for (const block of splitBlocks(item.text))
             segments.push({ kind: "prose", text: block.raw })
+      } else if (item.kind === "halt") {
+         segments.push({ kind: "frame", text: haltLine(item) })
       } else if (item.kind === "call") {
          const result = item.id === undefined ? undefined : results.get(item.id)
          const spec = classify(item.name)
@@ -105,7 +124,17 @@ export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
             kind: spec.kind,
             pointers: rendered.pointers,
          })
-      } else if (item.id === undefined || !callIds.has(item.id)) {
+      } else if (item.kind === "report") {
+         const call = item.id === undefined ? undefined : calls.get(item.id)
+         const rendered = renderReport(item, call, env)
+         segments.push(...rendered.segments)
+         interactions.push({
+            id: item.id,
+            tool: call?.name ?? "subagent",
+            kind: "report",
+            pointers: rendered.pointers,
+         })
+      } else if (item.id === undefined || !calls.has(item.id)) {
          const out = outputPhrase(item, env, true)
          segments.push({ kind: "tool", text: `[tool output]${out.text}` })
          interactions.push({
@@ -117,11 +146,25 @@ export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
       }
    }
    segments.push({ kind: "frame", text: CLOSING })
-   return { segments, interactions }
+   return { segments, interactions, memory: reads.memory() }
 }
 
 export function packageText(pkg: PeerPackage): string {
    return pkg.segments.map((s) => s.text).join("\n\n")
+}
+
+function haltLine(halt: Extract<TrailItem, { kind: "halt" }>): string {
+   switch (halt.why) {
+      case "interrupted":
+         return "[the human interrupted the peer here]"
+      case "aborted":
+         return "[the peer's turn was aborted here]"
+      case "error": {
+         const detail =
+            halt.detail === undefined ? "" : `: ${clip(halt.detail, BRIEF_LIMIT)}`
+         return `[the peer's turn ended with an error${detail}]`
+      }
+   }
 }
 
 function renderCall(
@@ -142,9 +185,11 @@ function renderCall(
       case "edit":
          return renderEdit(call, result, env) ?? renderGeneric(call, result, env)
       case "write":
-         return renderWrite(call, result, env) ?? renderGeneric(call, result, env)
+         return renderWrite(call, result, env, reads) ?? renderGeneric(call, result, env)
       case "subagent":
          return renderSubagent(call, result, env) ?? renderGeneric(call, result, env)
+      case "message":
+         return renderMessage(call, result, env) ?? renderGeneric(call, result, env)
       case "search":
          return renderSearch(call, result, env)
       case "remote":
@@ -171,6 +216,7 @@ function renderRead(
       const error = errorPhrase(result, env)
       return tool(`${head}${error.text}`, error.pointers)
    }
+   if (result.media !== undefined) return tool(`${head} (${result.media})`, [path])
    const seen = view(result.text, call.input as Record<string, unknown>)
    if (seen === undefined) return undefined
 
@@ -178,7 +224,7 @@ function renderRead(
    const earlier = reads.find(path, seen)
    if (earlier?.same === "range")
       return tool(`${head} ${range} (again)`, earlier.pointers)
-   if (earlier?.same === "covered") return { segments: [], pointers: earlier.pointers }
+   if (earlier !== undefined) return { segments: [], pointers: earlier.pointers }
 
    const current = env.readFile(path)
    const unchanged = current !== undefined && sameLines(current, seen)
@@ -265,6 +311,7 @@ function renderWrite(
    call: TrailCall,
    result: TrailResult | undefined,
    env: PackageEnv,
+   reads: ReadMemory,
 ): Rendered | undefined {
    const path = inputPath(call.input)
    const content = (call.input as Record<string, unknown> | undefined)?.content
@@ -280,11 +327,13 @@ function renderWrite(
    const head = `[tool] wrote ${path} (${plural(lineCount(content), "line")}`
    const status = result === undefined ? " → no result recorded" : ""
    const current = env.readFile(path)
-   if (current !== undefined && normalise(current) === normalise(content)) {
-      return tool(`${head})${status}`, [path])
-   }
-   const ref = env.refer(content)
-   return tool(`${head}; file changed since; peer's version: ${ref})${status}`, [ref])
+   const unchanged = current !== undefined && normalise(current) === normalise(content)
+   const pointers = unchanged ? [path] : [env.refer(content)]
+   reads.add(path, { start: 1, lines: normalise(content).split("\n") }, pointers, true)
+   if (unchanged) return tool(`${head})${status}`, pointers)
+   return tool(`${head}; file changed since; peer's version: ${pointers[0]})${status}`, [
+      ...pointers,
+   ])
 }
 
 function renderSubagent(
@@ -307,24 +356,93 @@ function renderSubagent(
       head += ` (transcript: ${result.transcript})`
    }
    if (result === undefined) return tool(`${head} → no result recorded`, pointers)
+   if (result.background === true)
+      return tool(`${head} → running in the background`, pointers)
    if (result.isError || result.saved !== undefined || result.text === "") {
       const output = outputPhrase(result, env, true)
       return tool(`${head}${output.text}`, [...pointers, ...output.pointers])
    }
-
-   let report = result.text
-   if (report.length > REPORT_LIMIT) {
-      const ref = env.refer(report)
-      pointers.push(ref)
-      report = `${cutAtLine(report, REPORT_LIMIT)}\n… (full report: ${ref})`
-   }
+   const report = reportSegment("[subagent report]", result.text, env)
    return {
-      segments: [
-         { kind: "tool", text: head },
-         { kind: "prose", text: `[subagent report]\n${report}` },
-      ],
-      pointers,
+      segments: [{ kind: "tool", text: head }, report.segment],
+      pointers: [...pointers, ...report.pointers],
    }
+}
+
+function renderReport(
+   report: TrailReport,
+   call: TrailCall | undefined,
+   env: PackageEnv,
+): Rendered {
+   const who =
+      report.label ??
+      (call === undefined ? undefined : subagentBrief(call.input)?.what) ??
+      (report.agent === undefined ? undefined : `agent ${report.agent}`)
+   const notes: string[] = []
+   if (call === undefined) notes.push("started earlier")
+   if (report.status !== undefined && !/^(completed|done)$/i.test(report.status))
+      notes.push(report.status)
+   const pointers: string[] = []
+   if (report.transcript !== undefined) {
+      notes.push(`transcript: ${report.transcript}`)
+      pointers.push(report.transcript)
+   }
+   const label = who === undefined ? "" : `: ${clip(who, BRIEF_LIMIT)}`
+   const said = notes.length === 0 ? "" : ` (${notes.join("; ")})`
+   if (report.text === "")
+      return tool(`[subagent finished${label}]${said} → no report`, pointers)
+   const shown = reportSegment(`[subagent report${label}]${said}`, report.text, env)
+   return { segments: [shown.segment], pointers: [...pointers, ...shown.pointers] }
+}
+
+function reportSegment(
+   head: string,
+   text: string,
+   env: PackageEnv,
+): { segment: Segment; pointers: string[] } {
+   const ref = env.refer(text)
+   const compact = `${head} → ${plural(lineCount(text), "line")}, ${ref}`
+   if (text.length <= REPORT_LIMIT)
+      return {
+         segment: { kind: "report", text: `${head}\n${text}`, compact },
+         pointers: [],
+      }
+   return {
+      segment: {
+         kind: "report",
+         text: `${head}\n${cutAtLine(text, REPORT_LIMIT)}\n… (full report: ${ref})`,
+         compact,
+      },
+      pointers: [ref],
+   }
+}
+
+// CC SendMessage {to, summary, message}; pi steer_subagent {agent_id, message}
+function renderMessage(
+   call: TrailCall,
+   result: TrailResult | undefined,
+   env: PackageEnv,
+): Rendered | undefined {
+   if (!isRecord(call.input)) return undefined
+   const str = (v: unknown) => (typeof v === "string" && v.trim() !== "" ? v : undefined)
+   const to = str(call.input.to) ?? str(call.input.agent_id) ?? str(call.input.recipient)
+   const message = str(call.input.message) ?? str(call.input.content)
+   if (message === undefined) return undefined
+   const shown = str(call.input.summary) ?? clip(message, BRIEF_LIMIT)
+   const pointers: string[] = []
+   let text = `[tool] message to subagent${to === undefined ? "" : ` ${to}`}: ${shown}`
+   if (shown !== message) {
+      const ref = env.refer(message)
+      pointers.push(ref)
+      text += ` (full message: ${ref})`
+   }
+   if (result === undefined) text += " → no result recorded"
+   else if (result.isError) {
+      const error = errorPhrase(result, env)
+      text += error.text
+      pointers.push(...error.pointers)
+   }
+   return tool(text, pointers)
 }
 
 function tool(text: string, pointers: readonly string[]): Rendered {
@@ -352,6 +470,8 @@ function outputPhrase(
 ): Phrase {
    if (result === undefined) return { text: " → no result recorded", pointers: [] }
    if (result.isError) return errorPhrase(result, env)
+   if (result.background === true)
+      return { text: " → running in the background", pointers: [] }
    if (result.saved !== undefined) {
       const size = result.saved.size === undefined ? "" : `${result.saved.size}, `
       return {
@@ -359,17 +479,22 @@ function outputPhrase(
          pointers: [result.saved.path],
       }
    }
-   if (result.text === "") return { text: " → no output", pointers: [] }
+   const media = result.media === undefined ? "" : ` (+${result.media})`
+   if (result.text === "")
+      return { text: ` → ${result.media ?? "no output"}`, pointers: [] }
    const lines = lineCount(result.text)
    if (inlineTiny && lines <= TINY_LINES && result.text.length <= TINY_CHARS) {
       const body = result.text.replace(/\n$/, "")
       return {
-         text: lines === 1 ? ` → ${body}` : ` →\n  ${body.split("\n").join("\n  ")}`,
+         text:
+            lines === 1
+               ? ` → ${body}${media}`
+               : ` →${media}\n  ${body.split("\n").join("\n  ")}`,
          pointers: [],
       }
    }
    const ref = env.refer(result.text)
-   return { text: ` → ${plural(lines, "line")}, ${ref}`, pointers: [ref] }
+   return { text: ` → ${plural(lines, "line")}${media}, ${ref}`, pointers: [ref] }
 }
 
 function errorPhrase(result: TrailResult, env: PackageEnv): Phrase {
@@ -379,9 +504,25 @@ function errorPhrase(result: TrailResult, env: PackageEnv): Phrase {
    return { text: ` → error: ${first} (full: ${ref})`, pointers: [ref] }
 }
 
-class ReadMemory {
-   readonly #seen = new Map<string, { view: ReadView; pointers: readonly string[] }[]>()
+interface Seen {
+   readonly view: ReadView
+   readonly pointers: readonly string[]
+   /** a read-back of a write tells the receiver nothing */
+   readonly written: boolean
+}
 
+class ReadMemory {
+   readonly #seen = new Map<string, Seen[]>()
+   readonly #given: (readonly [string, string, string])[]
+   readonly #earlier = new Map<string, string>()
+
+   constructor(prior: PackageMemory | undefined) {
+      this.#given = [...(prior?.reads ?? [])]
+      for (const [path, fingerprint, pointer] of this.#given)
+         this.#earlier.set(`${path}\n${fingerprint}`, pointer)
+   }
+
+   /** range: same view again here; covered: inside an earlier view; given: in an earlier package */
    find(path: string, view: ReadView) {
       for (const earlier of this.#seen.get(path) ?? []) {
          const offset = view.start - earlier.view.start
@@ -392,18 +533,35 @@ class ReadMemory {
             !view.lines.every((line, i) => line === earlier.view.lines[offset + i])
          )
             continue
-         const same = offset === 0 && view.lines.length === earlier.view.lines.length
+         const same =
+            !earlier.written &&
+            offset === 0 &&
+            view.lines.length === earlier.view.lines.length
          return {
             same: same ? ("range" as const) : ("covered" as const),
             pointers: earlier.pointers,
          }
       }
-      return undefined
+      const given = this.#earlier.get(`${path}\n${fingerprint(view)}`)
+      return given === undefined
+         ? undefined
+         : { same: "given" as const, pointers: [given] }
    }
 
-   add(path: string, view: ReadView, pointers: readonly string[]) {
-      this.#seen.set(path, [...(this.#seen.get(path) ?? []), { view, pointers }])
+   add(path: string, view: ReadView, pointers: readonly string[], written = false) {
+      this.#seen.set(path, [...(this.#seen.get(path) ?? []), { view, pointers, written }])
+      const [pointer] = pointers
+      if (pointer !== undefined) this.#given.push([path, fingerprint(view), pointer])
    }
+
+   memory(): PackageMemory {
+      return { reads: this.#given.slice(-MEMORY_READS) }
+   }
+}
+
+function fingerprint(view: ReadView): string {
+   const digest = sha256Hex(view.lines.join("\n")).slice(0, 32)
+   return `${view.start}:${view.lines.length}:${digest}`
 }
 
 function sameLines(current: string, view: ReadView): boolean {
