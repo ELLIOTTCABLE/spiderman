@@ -19,6 +19,8 @@ export interface TurnConfig {
    /** kept clear of a hook's budget for work after a wait: chunk release; elision */
    readonly submitReserveMs: number
    readonly stopReserveMs: number
+   /** B elides its own answer in an extra turn (Bx), which keeps it busy until rewound */
+   readonly bx: boolean
 }
 
 export const defaultTurnConfig: TurnConfig = {
@@ -29,6 +31,7 @@ export const defaultTurnConfig: TurnConfig = {
    retryMs: 2_000,
    submitReserveMs: 1_500,
    stopReserveMs: ELISION_TIMEOUT_MS + 5_000,
+   bx: false,
 }
 
 export interface Part {
@@ -66,7 +69,15 @@ export type TurnEvent =
         readonly lastAssistantMessage?: string
         readonly budgetMs?: number
      }
-   | { readonly type: "bSettled"; readonly turn: number; readonly outcome: BOutcome }
+   | {
+        readonly type: "bSettled"
+        readonly turn: number
+        readonly outcome: BOutcome
+        /** whether the turn left any answer text */
+        readonly answered: boolean
+     }
+   /** B's elision turn for `turn` is over and rewound (or failed): B is free again */
+   | { readonly type: "bxDone"; readonly turn: number }
    /** starting B's turn failed (e.g. compaction in flight, model guard); its prompts go back */
    | { readonly type: "bFailed"; readonly turn: number; readonly reason: string }
    | { readonly type: "tick" }
@@ -97,6 +108,8 @@ export type TurnEffect =
         readonly until: { readonly promptId: string } | "end"
         readonly lastAssistantMessage?: string
      }
+   /** B elides its answer to `turn` against A's final text, in its own session */
+   | { readonly type: "startBx"; readonly turn: number; readonly aText: string }
    | { readonly type: "wake"; readonly at: number }
    | { readonly type: "log"; readonly what: string; readonly detail?: unknown }
 
@@ -113,6 +126,7 @@ interface BTurn {
    readonly delivered: boolean
    readonly displayed: boolean
    readonly outcome?: BOutcome
+   readonly answered?: boolean
    /** kept so a failed start can put them back */
    readonly prompts: readonly Pending[]
 }
@@ -133,6 +147,8 @@ interface Group {
       readonly at: number
    }
    readonly waitFor?: { readonly turn: number; readonly deadline: number }
+   /** a Stop's `last_assistant_message`, for an elision that starts once B settles */
+   readonly aText?: string
 }
 
 export interface TurnState {
@@ -147,6 +163,10 @@ export interface TurnState {
    readonly bRunning: number | undefined
    readonly bBlockedUntil: number | undefined
    readonly bFailures: number
+   /** B's elision turn in flight; B takes no new turn until it is rewound */
+   readonly bx:
+      | { readonly turn: number; readonly lastAssistantMessage: string | undefined }
+      | undefined
    readonly groups: readonly Group[]
    readonly nextTurn: number
 }
@@ -161,6 +181,7 @@ export const initialTurnState: TurnState = {
    bRunning: undefined,
    bBlockedUntil: undefined,
    bFailures: 0,
+   bx: undefined,
    groups: [],
    nextTurn: 1,
 }
@@ -213,7 +234,9 @@ class Machine {
          case "stop":
             return this.#request(event, () => this.#stop(event))
          case "bSettled":
-            return this.#bSettled(event.turn, event.outcome)
+            return this.#bSettled(event.turn, event.outcome, event.answered)
+         case "bxDone":
+            return this.#bxDone(event.turn)
          case "bFailed":
             return this.#bFailed(event.turn, event.reason)
          case "tick":
@@ -332,35 +355,53 @@ class Machine {
    #stop(
       event: Extract<TurnEvent, { type: "stop" }>,
    ): Omit<Group, "key" | "kind" | "waiters"> {
-      const startedBefore = this.state.nextTurn
       const owed = this.state.aOwed
+      const aText = event.lastAssistantMessage
       this.state = { ...this.state, aRunning: false, aOwed: Math.max(0, owed - 1) }
-      this.tryStartB(event.lastAssistantMessage)
-      const candidate = [...this.state.bTurns]
-         .reverse()
-         .find((t) => t.turn < startedBefore && !t.displayed)
-      this.#log("stop", { owed, candidate: candidate?.turn })
-      if (owed === 0 || candidate === undefined)
-         return { answer: { reply: { kind: "empty" }, at: this.#now } }
-      if (candidate.settled)
-         return { answer: { reply: this.#display(candidate.turn), at: this.#now } }
-      return {
-         waitFor: {
-            turn: candidate.turn,
-            deadline: this.#deadline(
-               this.#config.stopWaitMs,
-               event.budgetMs,
-               this.#config.stopReserveMs,
-            ),
-         },
+      const candidate = [...this.state.bTurns].reverse().find((t) => !t.displayed)
+      // prompts held back by an elision turn get their B turn later; this Stop waits for it
+      const queued =
+         candidate === undefined &&
+         this.state.bx !== undefined &&
+         this.state.pending.length > 0
+      this.#log("stop", { owed, candidate: candidate?.turn, queued })
+      const group = (): Omit<Group, "key" | "kind" | "waiters"> => {
+         if (owed === 0 || (candidate === undefined && !queued))
+            return { answer: { reply: { kind: "empty" }, at: this.#now } }
+         if (candidate?.settled)
+            return {
+               answer: { reply: this.#display(candidate.turn, aText), at: this.#now },
+            }
+         return {
+            waitFor: {
+               turn: candidate?.turn ?? this.state.nextTurn,
+               deadline: this.#deadline(
+                  this.#config.stopWaitMs,
+                  event.budgetMs,
+                  this.#config.stopReserveMs,
+               ),
+            },
+            ...(aText === undefined ? {} : { aText }),
+         }
       }
+      const result = group()
+      this.tryStartB(aText)
+      return result
    }
 
-   #bSettled(turn: number, outcome: BOutcome) {
-      this.#log("bSettled", { turn, outcome })
-      this.#updateTurn(turn, (t) => ({ ...t, settled: true, outcome }))
+   #bSettled(turn: number, outcome: BOutcome, answered: boolean) {
+      this.#log("bSettled", { turn, outcome, answered })
+      this.#updateTurn(turn, (t) => ({ ...t, settled: true, outcome, answered }))
       if (this.state.bRunning === turn)
          this.state = { ...this.state, bRunning: undefined, bFailures: 0 }
+   }
+
+   #bxDone(turn: number) {
+      const bx = this.state.bx
+      this.#log("bxDone", { turn })
+      if (bx?.turn !== turn) return
+      this.state = { ...this.state, bx: undefined }
+      this.tryStartB(bx.lastAssistantMessage)
    }
 
    #bFailed(turn: number, reason: string) {
@@ -387,7 +428,7 @@ class Machine {
          const reply =
             group.kind === "stop"
                ? turn?.settled
-                  ? this.#display(group.waitFor.turn)
+                  ? this.#display(group.waitFor.turn, group.aText)
                   : ({ kind: "empty" } as const)
                : this.#deliverUndelivered()
          const notice = turn?.settled ? undefined : PEER_SLOW
@@ -402,7 +443,8 @@ class Machine {
    tryStartB(lastAssistantMessage?: string) {
       const { pending, bRunning, bBlockedUntil, aRunning } = this.state
       const first = pending[0]
-      if (first === undefined || bRunning !== undefined) return
+      if (first === undefined || bRunning !== undefined || this.state.bx !== undefined)
+         return
       if (bBlockedUntil !== undefined && this.#now < bBlockedUntil) return
       if (!first.aIdleAtSubmit && aRunning) return
 
@@ -471,8 +513,22 @@ class Machine {
       return { kind: "deliver", turns }
    }
 
-   #display(turn: number): Reply {
+   #display(turn: number, aText: string | undefined): Reply {
       this.#updateTurn(turn, (t) => ({ ...t, displayed: true }))
+      const shown = this.#turn(turn)
+      // no elision turn for an errored, aborted or empty answer, nor while B is occupied
+      if (
+         this.#config.bx &&
+         shown?.outcome === "completed" &&
+         shown.answered === true &&
+         aText !== undefined &&
+         aText.trim() !== "" &&
+         this.state.bRunning === undefined &&
+         this.state.bx === undefined
+      ) {
+         this.state = { ...this.state, bx: { turn, lastAssistantMessage: aText } }
+         this.effects.push({ type: "startBx", turn, aText })
+      }
       return { kind: "display", turn }
    }
 

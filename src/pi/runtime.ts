@@ -136,7 +136,12 @@ export class Runtime {
       const messages = this.#deps.b.messagesSince(data?.leaf)
       const outcome = bOutcome(messages)
       this.#turns.set(running.turn, { ...data, leaf: data?.leaf, messages, outcome })
-      this.#dispatch({ type: "bSettled", turn: running.turn, outcome })
+      this.#dispatch({
+         type: "bSettled",
+         turn: running.turn,
+         outcome,
+         answered: bAnswerText(messages).trim() !== "",
+      })
    }
 
    dispose(): void {

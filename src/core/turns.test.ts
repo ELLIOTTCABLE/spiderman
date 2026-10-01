@@ -60,10 +60,12 @@ function stop(promptId: string, last = "A's answer", k = 1, session = "cc1") {
 const settled = (
    turn: number,
    outcome: "completed" | "error" | "aborted" = "completed",
+   answered = true,
 ): TurnEvent => ({
    type: "bSettled",
    turn,
    outcome,
+   answered,
 })
 
 const replies = (effects: TurnEffect[]) =>
@@ -360,4 +362,108 @@ test("waits never outlast the hook's own budget, whatever the configured caps", 
       stopping.filter((e) => e.type === "wake"),
       [{ type: "wake", at: 1_010 }],
    )
+})
+
+class BxSim extends Sim {
+   override send(event: TurnEvent, at = this.now): TurnEffect[] {
+      this.now = at
+      const result = step(this.state, event, at, { ...config, bx: true })
+      this.state = result.state
+      return result.effects.filter((e) => e.type !== "log")
+   }
+}
+const bxStarts = (effects: TurnEffect[]) =>
+   effects.flatMap((e) =>
+      e.type === "startBx" ? [{ turn: e.turn, aText: e.aText }] : [],
+   )
+const bxDone = (turn: number): TurnEvent => ({ type: "bxDone", turn })
+
+test("Bx: a shown answer starts B's elision turn; B takes no new turn until it is rewound", () => {
+   const sim = new BxSim()
+   sim.send(submit("U1", "p1"), 0)
+   sim.send(settled(1), 10)
+   const atStop = sim.send(stop("p1", "A1"), 20)
+   assert.deepEqual(replies(atStop), [
+      { reply: { kind: "display", turn: 1 }, notice: undefined },
+   ])
+   assert.deepEqual(bxStarts(atStop), [{ turn: 1, aText: "A1" }])
+
+   const next = sim.send(submit("U2", "p2"), 30)
+   assert.deepEqual(
+      replies(next),
+      [{ reply: { kind: "deliver", turns: [1] }, notice: undefined }],
+      "B's answer is settled, so A gets it at once; the elision turn doesn't hold it",
+   )
+   assert.deepEqual(starts(next), [])
+   assert.deepEqual(starts(sim.send(bxDone(1), 40)), [
+      { turn: 2, prompts: ["U2"], until: { promptId: "p2" } },
+   ])
+})
+
+test("Bx: a Stop already waiting starts the elision turn when B settles, with its A text", () => {
+   const sim = new BxSim()
+   sim.send(submit("U1", "p1"), 0)
+   assert.deepEqual(sim.send(stop("p1", "A1"), 10), [{ type: "wake", at: 5_010 }])
+   const done = sim.send(settled(1), 20)
+   assert.deepEqual(replies(done), [
+      { reply: { kind: "display", turn: 1 }, notice: undefined },
+   ])
+   assert.deepEqual(bxStarts(done), [{ turn: 1, aText: "A1" }])
+})
+
+test("Bx: no elision turn for an errored, aborted or empty answer, nor against empty A text", () => {
+   for (const [outcome, answered, aText] of [
+      ["error", true, "A1"],
+      ["aborted", true, "A1"],
+      ["completed", false, "A1"],
+      ["completed", true, " "],
+   ] as const) {
+      const sim = new BxSim()
+      sim.send(submit("U1", "p1"), 0)
+      sim.send(settled(1, outcome, answered), 10)
+      const atStop = sim.send(stop("p1", aText), 20)
+      assert.equal(replies(atStop)[0]?.reply.kind, "display")
+      assert.deepEqual(bxStarts(atStop), [], `${outcome}/${answered}/${aText}`)
+      assert.equal(sim.state.bx, undefined)
+   }
+})
+
+test("Bx: a mid-turn prompt waits for the elision turn, then starts with A's final answer", () => {
+   const sim = new BxSim()
+   sim.send(submit("U1", "p1"), 0)
+   sim.send(settled(1), 10)
+   sim.send(submit("U2", "p1"), 20)
+   const atStop = sim.send(stop("p1", "A1 text"), 30)
+   assert.deepEqual(bxStarts(atStop), [{ turn: 1, aText: "A1 text" }])
+   assert.deepEqual(starts(atStop), [])
+   const after = sim.send(bxDone(1), 40)
+   assert.deepEqual(starts(after), [{ turn: 2, prompts: ["U2"], until: "end" }])
+   assert.equal(after.find((e) => e.type === "startB")?.lastAssistantMessage, "A1 text")
+})
+
+test("Bx: a Stop whose prompt is held back by the elision turn waits for that prompt's answer", () => {
+   const sim = new BxSim()
+   sim.send(submit("U1", "p1"), 0)
+   sim.send(settled(1), 10)
+   sim.send(stop("p1", "A1"), 20)
+   sim.send(submit("U2", "p2"), 30)
+   assert.deepEqual(replies(sim.send(stop("p2", "A2"), 40)), [])
+   assert.deepEqual(starts(sim.send(bxDone(1), 50)), [
+      { turn: 2, prompts: ["U2"], until: { promptId: "p2" } },
+   ])
+   const done = sim.send(settled(2), 60)
+   assert.deepEqual(replies(done), [
+      { reply: { kind: "display", turn: 2 }, notice: undefined },
+   ])
+   assert.deepEqual(bxStarts(done), [{ turn: 2, aText: "A2" }])
+})
+
+test("Bx: a stray bxDone for another turn frees nothing", () => {
+   const sim = new BxSim()
+   sim.send(submit("U1", "p1"), 0)
+   sim.send(settled(1), 10)
+   sim.send(stop("p1", "A1"), 20)
+   sim.send(submit("U2", "p2"), 30)
+   assert.deepEqual(starts(sim.send(bxDone(7), 40)), [])
+   assert.equal(sim.state.bx?.turn, 1)
 })
