@@ -192,9 +192,19 @@ human reads A_N + elided B_N, types U_{N+1}
   - UserPromptSubmit on mid-turn messages;
   - a Codex cache idle-gap schedule (~75 min, background);
   - scrubbed fixtures.
-- `core`: done and folded (toolchain + pure core, 114 tests). The same builder continues as `integration` in `.tmp/trees/core`: reducer, pi extension, CC plugin, README.
-  - It does not touch the trail/package/chunk modules.
-  - `PackageMemory` is opaque to it.
+- `core` + `integration`: folded at 9f24ccf (170 tests).
+  - Shipped: the reducer `turns.ts`, `bridge`, `standing`, `mediator`, the pi side (`server`, `peer-file`, `runtime`, `extension`), the CC plugin (SessionStart ×1, UserPromptSubmit ×4, Stop ×2, one fail-open `hook.ts`), and the README.
+  - Reducer rules beyond the ledger, endorsed:
+    - a Stop with no owed human prompt displays nothing;
+    - a fresh `prompt_id` while A is "running" means A was interrupted;
+    - SessionStart `source:"clear"` takes over the pair;
+    - the first B turn after pairing gets no A backlog.
+  - Not built: the `bx` strategy (`RuntimeDeps.mediate` is the seam).
+  - Known jank:
+    - a queued prompt merged into A's running turn has its B answer displayed only at a later Stop;
+    - a Stop during transcript lag may repeat A's final text in the next package.
+  - Follow-ups in flight: unconditional SessionStart instructions (start order shouldn't matter), deadline propagation from hook to server, non-human prompt detection.
+  - `PackageMemory` is defined but not threaded. The tuning lane threads it through `runtime.ts` after it folds.
 - `tune`: tuning builder in `.tmp/trees/tune` (`ai/tune`).
   - Owns `cc-trail`, `pi-trail`, `package` and `chunk`.
   - Applies the real-session findings above plus cross-turn read dedupe (`PackageMemory`).
