@@ -220,6 +220,16 @@ human reads A_N + elided B_N, types U_{N+1}
     - After answering the submit's hooks, the extension polls for the new user entry: a non-meta, non-tool_result `user` entry, appended after the byte offset recorded at submit, with the same text.
     - Its `parentUuid` gives the branch point, and only then is B's package built and B started.
     - There is no tail fallback. If the entry never appears (cap ~60 s; e.g. another hook blocked the prompt), B is not started.
+- **Verified end to end (2026-10-01, haiku A + luna B, CC 2.1.287, +SURE):** all 7 scenarios passed.
+  - B starts only after CC writes the prompt entry.
+  - Pane asides reach A as trail.
+  - The debug flow (asides, then `/tree` back) survives a pi restart via the `spiderman-tree` pin.
+  - An Esc-Esc edit leaks no abandoned A answer, and A's lost B content returns at the next prompt.
+  - `/tree` in B past a shared prompt re-sends only what B lost.
+  - Bx lands on an abandoned branch, with held pane input resubmitted after the rewind and B's `cacheRead` preserved.
+  - `@path` reaches B as a plain path, and B reads the file.
+- **Known small holes, accepted:** after an Esc-Esc edit of the last shared prompt, A can receive B's answer to the abandoned prompt without its question. A's delivery is built at hook time, while the old prompt still looks live.
+- **Operational:** CC auto-updated 2.1.286 → 2.1.287 mid-session and removed the old install dir. mise tracks `latest`; pin it for reproducibility.
 - **Harness-agnostic shape:** the ledger, sync points, reducer and package builder speak only a neutral side view: ordered live items with stable ids, plus "where are my deliveries".
   - Per-harness adapters supply the view and the delivery mechanism: CC = transcript + hooks; pi = session + extension.
   - Nothing in core may assume which harness is A or B.
