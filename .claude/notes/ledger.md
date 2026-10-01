@@ -21,8 +21,14 @@ Overnight autonomous run started 2026-09-30 while the human sleeps. Conductor: O
   - The architecture must keep auto-follow possible as a future option.
 - **Direct messages to B.** The human types in B's pane like in A's, e.g. to debug, then rewinds B to the last point where the two agree.
 - **Stretch, later:** harness-agnosticism (pi↔pi, CC↔pi, CC↔CC, maybe opencode/codex). Not now, but nothing may lock it out.
-- **Later:** configure options on the fly, in-client.
-  - ~SUSPECT feasible with zero model turns: a CC plugin slash command expands to a prompt, and a `UserPromptSubmit` hook intercepts it, applies the setting, and returns `decision:"block"` (the reason is shown to the human, nothing is sent to the model).
+- **Later:** configure options on the fly, in-client. Verified feasible (2026-10-01 probe, +SURE):
+  - A plugin command file gives a namespaced `/<plugin>:<name> args`; a bare `/spiderman` is "Unknown command" and no hooks fire.
+  - `UserPromptExpansion` fires first, with `command_name`, `command_args` and `command_source:"plugin"`.
+  - Returning `decision:"block"` there means zero model requests. UserPromptSubmit and Stop don't fire, no `user` entry is written, and nothing reaches the context on later turns.
+  - The human sees "UserPromptExpansion operation blocked by hook: <reason>".
+  - Planned shape:
+    - `/spiderman:set <key> <value>` for settings;
+    - `/spiderman:b <message>`, a B-only aside sent from A's pane with zero A turns, useful from the phone.
   - pi has native extension commands.
 
 ## Design (current)
