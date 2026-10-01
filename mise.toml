@@ -15,7 +15,7 @@ HK_MISE = "1"
 [tasks.test]
 description = "Unit tests, full per-test output."
 raw = true
-run = "node --test \"src/**/*.test.ts\""
+run = "node --test --test-timeout=30000 \"src/**/*.test.ts\""
 
 [tasks.check]
 description = "Typecheck plus lint and format check. Silent-ish on success."
@@ -31,7 +31,7 @@ raw = true
 run = [
    "tsc --noEmit --project tsconfig.json",
    "biome check --error-on-warnings .",
-   "node --test --test-reporter=dot \"src/**/*.test.ts\"",
+   "node --test --test-timeout=30000 --test-reporter=dot \"src/**/*.test.ts\"",
 ]
 
 [tasks.fmt]
