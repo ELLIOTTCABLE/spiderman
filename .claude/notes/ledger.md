@@ -13,6 +13,18 @@ Overnight autonomous run started 2026-09-30 while the human sleeps. Conductor: O
 - Budget: about 10M tokens across conductor and Opus builders. Experiments use only `haiku` and `openai-codex/gpt-6-luna`. Fable is unavailable (weekly limit).
 - Raw Anthropic/OpenAI tokens: already scheduled for rotation. Seeing them is noted, not a stop. Any other secret still stops work.
 
+## Remit additions (human, 2026-10-01)
+- **Elision options.** Both the stateless mediator (default model = B's own model) and Bx (B elides in its own turn, then rewound) are wanted, behind a flag. The output is paragraph numbers, to minimise output tokens.
+- **Coherence is secondary.** It's ideal, but token economy, cache-window survival, and no extra turns come first. Models are high-reasoning and can bridge small holes, so spend no tokens on "withdrawn" notices.
+- **Rewinds.** The human must be able to rewind either side freely.
+  - Do NOT auto-follow rewinds across sides for now; the human does it by hand in both windows.
+  - The architecture must keep auto-follow possible as a future option.
+- **Direct messages to B.** The human types in B's pane like in A's, e.g. to debug, then rewinds B to the last point where the two agree.
+- **Stretch, later:** harness-agnosticism (pi↔pi, CC↔pi, CC↔CC, maybe opencode/codex). Not now, but nothing may lock it out.
+- **Later:** configure options on the fly, in-client.
+  - ~SUSPECT feasible with zero model turns: a CC plugin slash command expands to a prompt, and a `UserPromptSubmit` hook intercepts it, applies the setting, and returns `decision:"block"` (the reason is shown to the human, nothing is sent to the model).
+  - pi has native extension commands.
+
 ## Design (current)
 
 ### Turn protocol: staggered-symmetric, no extra turns
@@ -141,6 +153,48 @@ human reads A_N + elided B_N, types U_{N+1}
 - Rust was considered and rejected: a second language just for thin hook clients.
 - mise pins tools and tasks; npm handles dependencies; `node:test` for tests; `tsc` strict.
 - Claude Code side is a plugin dir (`claude --plugin-dir <repo>/plugin`); pi side is `pi -e <repo>/src/pi/extension.ts`.
+
+### Coherence across rewinds and asides (designed 2026-10-01; replaces cursor bookkeeping)
+- **Peer content lives in the receiver's own tree.**
+  - A: `hook_additional_context` attachments, children of the prompt's user entry on CC's parent chain.
+  - B: the user message we inject.
+  - A rewind therefore drops the received peer content along with everything else.
+- **Derived state, not cursors.** At every event, spiderman derives the delivery state from both live branches (CC parent chain; pi `getBranch()`).
+- **Ledger.** One record per delivery:
+  - the direction;
+  - the receiver entry that carries it, identified afterwards by matching the exact sent text, so no tag tokens are needed;
+  - the last peer entry it covered.
+- **Sync point(X):** the newest peer entry covered by a delivery that is still on X's live branch, clipped to the fork point if the peer has since abandoned that entry.
+- **Delivery rule:** each delivery to X carries the peer's live-branch items after sync(X). Nothing else, and no "withdrawn" text.
+  - Receiver rewinds re-send exactly what X lost.
+  - Peer rewinds stop at the fork, so abandoned peer turns are never sent.
+  - Stale knowledge (peer content X saw that the peer later abandoned) is accepted silently.
+- **Invariants:**
+  - each context only appends or moves its leaf back, so the cache prefix is never edited;
+  - deliveries ride only on human-caused turns, and leaf moves are not model requests;
+  - only live-branch content is sent.
+- **Spine:** the shared human prompts. The pair (A user entry, B carrier entry) falls out of the ledger, so a future auto-follow needs no new bookkeeping.
+
+| # | Human does | spiderman | Coherence | Cost |
+|---|---|---|---|---|
+| 1 | normal prompt in A | B: A-items after sync + prompt; A: B-items after sync | full | 0 extra |
+| 2 | `~` aside in A | A-only turn; reaches B as trail at the next shared prompt if still live | full | 0 |
+| 3 | types in B's pane | B-only turn; reaches A as trail ("the human asked the peer directly…") at A's next prompt if still live | full | 0 |
+| 4 | rewinds A past an aside | local; never sent if not yet delivered | small hole | 0 |
+| 5 | rewinds or edits A past a shared prompt | no follow (human choice). B keeps its old exchange and gets the edited prompt as a normal turn. Future option `follow`: move B's leaf to before the carrier (abort if running), with no follow on an identical resubmit | small hole (follow: full) | 0 |
+| 6 | chats in B, then `/tree` back (debug flow) | local; the abandoned debug exchange never reaches A | full | 0 |
+| 7 | `/tree` in B past shared prompts | local. The next A prompt re-sends A's live items after B's new sync; A keeps B's abandoned answers as stale history | B full, A small hole | 0 extra, one larger package |
+| 8 | Bx elision turn | internal B aside, rewound; carries no deliveries | full | accepted Bx cost |
+| 9 | pi restart | new pairing, last-turn backlog | acceptable | 0 |
+| 10 | compaction on either side | deliveries before the boundary count as seen; never re-sent | summary-level | inherent |
+
+- **Open (probe):** at `UserPromptSubmit` time, is the new prompt's user entry (with `parentUuid`) already in CC's transcript? Does CC write a marker on Esc-Esc or `/rewind`?
+  - If neither: at submit, an edited prompt's abandoned A answer still looks live, and can leak into B's package once.
+  - Harmless under "small holes OK"; the Stop-time derivation corrects later deliveries.
+- **Harness-agnostic shape:** the ledger, sync points, reducer and package builder speak only a neutral side view: ordered live items with stable ids, plus "where are my deliveries".
+  - Per-harness adapters supply the view and the delivery mechanism: CC = transcript + hooks; pi = session + extension.
+  - Nothing in core may assume which harness is A or B.
+- `@path` in a human prompt reaches B as a plain path. CC didn't inline the 288 KB file; A read it itself, and B should too.
 
 ## Report corrections (the design report was not taken as written)
 - `PI_CACHE_RETENTION` and `cacheWarming` are no-ops for `openai-codex`.
