@@ -4,9 +4,9 @@ import { vetoElisions } from "./veto.ts"
 
 export interface Rendered {
    readonly text: string
-   /** 1-based numbers of the paragraphs shown as previews */
+   /** 1-based, like the elider's numbers */
    readonly elided: readonly number[]
-   /** 1-based numbers the elider picked but the veto kept */
+   /** picked by the elider, kept by the veto */
    readonly vetoed: readonly number[]
 }
 

@@ -60,9 +60,9 @@ export interface BSide {
    /** B's leaf, if a rewind can land exactly on it */
    rewindPoint(): string | undefined
    messagesSince(leafId: string | undefined): readonly unknown[]
-   /** moves B's leaf back to `entryId`: what followed stays in the file, out of B's context */
+   /** what followed `entryId` stays in the file but leaves B's context */
    rewind(entryId: string): Promise<Outcome>
-   /** stops B's current run, which still settles */
+   /** the run still settles */
    abort(): void
 }
 
@@ -76,7 +76,6 @@ export type Elision =
         readonly strategy: "mediator"
         readonly mediate: (aText: string, bText: string) => Promise<string>
      }
-   /** B elides its own answer in an extra turn of its session, then is rewound over it */
    | { readonly strategy: "bx" }
 
 export interface RuntimeConfig extends TurnConfig {
@@ -111,8 +110,7 @@ interface BTurnData {
 
 interface BxRun {
    readonly turn: number
-   /** the entry before the elision prompt, where B's leaf goes back to */
-   readonly leaf: string
+   readonly rewindTo: string
    readonly sentAt: number
    started: boolean
    readonly answer: Deferred<string>
@@ -143,7 +141,6 @@ export class Runtime {
    #bLedger: BLedger = emptyLedger
    #bRunning: { turn: number; started: boolean } | undefined
    #bx: BxRun | undefined
-   /** per B turn: the elision turn's reply text */
    readonly #bxAnswers = new Map<number, Promise<string>>()
    #cancelWake: (() => void) | undefined
    #nextId = 0
@@ -431,7 +428,7 @@ export class Runtime {
          case "bx": {
             const answer = this.#bxAnswers.get(turn)
             if (answer === undefined) {
-               // the reducer skips Bx for these on purpose; anything else found B occupied
+               // the reducer skips these on purpose; otherwise B was occupied
                return outcome !== "completed" || aText.trim() === ""
                   ? none
                   : unparseable("B was busy, so no elision turn")
@@ -450,8 +447,8 @@ export class Runtime {
       const answer = deferred<string>()
       this.#bxAnswers.set(effect.turn, answer.promise)
       const bText = bAnswerText(this.#turns.get(effect.turn)?.messages ?? [])
-      const leaf = b.rewindPoint()
-      if (leaf === undefined) {
+      const rewindTo = b.rewindPoint()
+      if (rewindTo === undefined) {
          answer.reject(new Error("B's last entry is no point to rewind to"))
          this.#bxDone(effect.turn, { sent: false, reason: "no rewind point" })
          return
@@ -464,7 +461,7 @@ export class Runtime {
       }
       const run: BxRun = {
          turn: effect.turn,
-         leaf,
+         rewindTo,
          sentAt: now(),
          started: false,
          answer,
@@ -476,7 +473,7 @@ export class Runtime {
          answer.reject(new Error("B did not start it"))
          this.#bxDone(run.turn, { sent: true, reason: "not started" })
       })
-      // the display gives up here; the turn is stopped, and its settle still rewinds it
+      // the display gives up; the aborted turn still settles, and so is rewound
       setTimer(ELISION_TIMEOUT_MS, () => {
          if (this.#bx !== run) return
          answer.reject(new Error("timed out"))
@@ -484,17 +481,17 @@ export class Runtime {
       })
    }
 
-   /** Runs inside pi's `agent_settled`, so pi defers the rewind until the settle is done. */
+   // synchronous inside pi's agent_settled, so pi defers the rewind command past the settle
    #bxSettled(run: BxRun) {
       const { b, now, setTimer } = this.#deps
-      const messages = b.messagesSince(run.leaf)
+      const messages = b.messagesSince(run.rewindTo)
       const outcome = bOutcome(messages)
       const reply = bAnswerText(messages)
       if (outcome === "completed") run.answer.resolve(reply)
       else run.answer.reject(new Error(`B's turn ${outcome}`))
       const rewound = new Promise<Outcome>((resolve) => {
          setTimer(REWIND_TIMEOUT_MS, () => resolve({ ok: false, reason: "timed out" }))
-         b.rewind(run.leaf).then(resolve, (error: unknown) =>
+         b.rewind(run.rewindTo).then(resolve, (error: unknown) =>
             resolve({ ok: false, reason: errorText(error) }),
          )
       })
@@ -638,12 +635,11 @@ function deferred<T>(): Deferred<T> {
       resolve = yes
       reject = no
    })
-   // a turn nobody displays may still fail; that is no unhandled rejection
+   // an undisplayed turn may still fail; that's no unhandled rejection
    promise.catch(() => {})
    return { promise, resolve, reject }
 }
 
-/** Token counts across a turn's assistant messages, as the provider reported them. */
 function usageOf(messages: readonly unknown[]): Record<string, number> {
    const total = { input: 0, cacheRead: 0, output: 0 }
    for (const message of messages) {

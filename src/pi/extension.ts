@@ -112,13 +112,12 @@ export default function spiderman(pi: ExtensionAPI): void {
    let rewinding:
       | {
            nonce: string
-           /** B's leaf when the rewind was asked for: the tip of the elision exchange */
            from: string | null
            target: string
            resolve: (outcome: Outcome) => void
         }
       | undefined
-   /** the one tree navigation the /tree guard lets through: our own rewind */
+   /** what the /tree guard lets through: our own rewind */
    let treeTarget: string | undefined
 
    pi.registerCommand(REWIND_COMMAND, {
@@ -223,7 +222,7 @@ export default function spiderman(pi: ExtensionAPI): void {
                const nonce = randomUUID()
                const from = live().sessionManager.getLeafId()
                rewinding = { nonce, from, target: entryId, resolve }
-               // tree navigation is command-only; from agent_settled, pi runs this after the settle
+               // navigateTree is command-only; sent inside agent_settled, this runs after the settle
                pi.sendUserMessage(`/${REWIND_COMMAND} ${nonce}`, {
                   expandPromptTemplates: true,
                })

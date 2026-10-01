@@ -15,7 +15,6 @@ function harness(
    options: {
       elision?: Elision
       refuse?: number
-      /** refuses only the elision prompt, with this reason */
       refuseBx?: string
       rewind?: () => Promise<Outcome>
    } = {},
@@ -39,7 +38,6 @@ function harness(
    const sent: string[] = []
    const scripted = new Map<number, unknown[]>()
    let refusals = options.refuse ?? 0
-   /** sends, rewinds and aborts, in the order B saw them */
    const seen: string[] = []
    const logs: Record<string, unknown>[] = []
    const b: BSide = {
@@ -362,7 +360,6 @@ const bx = { strategy: "bx" } as const
 const logged = (logs: Record<string, unknown>[], what: string) =>
    logs.flatMap(({ what: w, at: _at, ...rest }) => (w === what ? [rest] : []))
 
-/** B answered U1 and A stopped: the display now waits on B's elision turn, already sent. */
 async function elisionPending(h: ReturnType<typeof harness>) {
    h.transcript(userEntry("U1", "p1"))
    await h.runtime.handle(prompt("U1", "p1"))
@@ -374,7 +371,7 @@ async function elisionPending(h: ReturnType<typeof harness>) {
    await h.flush()
    h.transcript(userEntry("U2", "p2"))
    await h.runtime.handle(prompt("U2", "p2"))
-   // wrapped: an async function returning a promise would wait for it
+   // wrapped: an async function returning a promise would adopt it
    return { display }
 }
 

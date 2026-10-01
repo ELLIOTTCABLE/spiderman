@@ -65,7 +65,6 @@ function fakePi(
          getBranch: () => branch,
       },
    }
-   // what pi gives command handlers: tree navigation, guarded by session_before_tree
    const commandCtx = {
       ...ctx,
       async navigateTree(targetId: string) {
@@ -91,7 +90,6 @@ function fakePi(
       sendUserMessage(text: string, options?: { expandPromptTemplates?: boolean }) {
          const [, name, args] = /^\/(\S+)\s*(.*)$/s.exec(text) ?? []
          const command = name === undefined ? undefined : commands.get(name)
-         // pi runs an extension command instead of sending it, once the settle is done
          if (options?.expandPromptTemplates && command !== undefined)
             setImmediate(() => void command(args ?? "", commandCtx))
          else sent.push(text)
@@ -233,7 +231,6 @@ test("/tree in B's pane is cancelled with a pointer to Claude Code", () => {
    assert.match(pi.notices[0] ?? "", /type in Claude Code/)
 })
 
-/** One relayed turn whose B answer is shown at Stop; returns what the human sees. */
 async function displayedTurn(pi: ReturnType<typeof fakePi>, cwd: string) {
    await pi.emit("session_start", { reason: "startup" })
    const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }

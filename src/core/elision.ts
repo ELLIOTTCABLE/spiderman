@@ -1,8 +1,7 @@
 import { type Block, leadWords, splitBlocks } from "./blocks.ts"
 
-// The elision instruction (design report §2.4), shared by both elider strategies: a stateless
-// mediator call, and Bx, a turn in B's own session that is rewound afterwards. Either way the
-// output only steers what the human reads, never what either model receives.
+// design report §2.4, for both elider strategies; the output steers only what the human
+// reads, never what either model receives
 
 const CRITERIA =
    "A paragraph of B is redundant only if A makes the same claim, with the same conditions and caveats. A paragraph that disagrees with A, even in part, or that contains any observation, example, number, or reasoning step A lacks, is not redundant. Code blocks, lists and tables count as one paragraph each. When in doubt, it is not redundant."
@@ -25,10 +24,7 @@ export function mediatorInput(aText: string, bText: string): string {
 
 const INDEX_WORDS = 6
 
-/**
- * B already has its own answer in context, so the prompt carries only A's final text and a
- * short index of B's paragraphs; the exchange is rewound once answered.
- */
+// B has its own answer in context already, so an index of it suffices
 export function bxPrompt(aText: string, bBlocks: readonly Block[]): string {
    const index = bBlocks.map((block, i) => `${i + 1}: "${leadWords(block, INDEX_WORDS)}"`)
    return [
@@ -45,16 +41,14 @@ export function bxPrompt(aText: string, bBlocks: readonly Block[]): string {
 export const ELISION_TIMEOUT_MS = 90_000
 
 export type IndexParse =
-   /** 1-based paragraph numbers as the elider gave them, out-of-range ones included */
+   /** 1-based, as given: may repeat or be out of range */
    | { readonly kind: "ok"; readonly indices: readonly number[] }
    | { readonly kind: "unparseable"; readonly reason: string }
 
 const LIST = /^\d+(?:\s*(?:,|;|\band\b|\s)\s*\d+)*$/
 
-/**
- * Finds the answer line among fences and prose. Only a line that is wholly a list (or `none`)
- * counts: digits inside prose may be anything, and a wrong guess hides a paragraph.
- */
+// only a line that is wholly a list or `none` counts: digits in prose may be anything, and a
+// wrong pick hides a paragraph
 export function parseIndices(output: string): IndexParse {
    const answers = new Set<string>()
    for (const line of output.split("\n")) {

@@ -19,7 +19,7 @@ export interface TurnConfig {
    /** kept clear of a hook's budget for work after a wait: chunk release; elision */
    readonly submitReserveMs: number
    readonly stopReserveMs: number
-   /** B elides its own answer in an extra turn (Bx), which keeps it busy until rewound */
+   /** Bx: B elides in an extra turn of its own, which keeps it busy until rewound */
    readonly bx: boolean
 }
 
@@ -73,10 +73,9 @@ export type TurnEvent =
         readonly type: "bSettled"
         readonly turn: number
         readonly outcome: BOutcome
-        /** whether the turn left any answer text */
         readonly answered: boolean
      }
-   /** B's elision turn for `turn` is over and rewound (or failed): B is free again */
+   /** Bx is over, rewound or failed: B is free */
    | { readonly type: "bxDone"; readonly turn: number }
    /** starting B's turn failed (e.g. compaction in flight, model guard); its prompts go back */
    | { readonly type: "bFailed"; readonly turn: number; readonly reason: string }
@@ -108,7 +107,6 @@ export type TurnEffect =
         readonly until: { readonly promptId: string } | "end"
         readonly lastAssistantMessage?: string
      }
-   /** B elides its answer to `turn` against A's final text, in its own session */
    | { readonly type: "startBx"; readonly turn: number; readonly aText: string }
    | { readonly type: "wake"; readonly at: number }
    | { readonly type: "log"; readonly what: string; readonly detail?: unknown }
@@ -147,7 +145,7 @@ interface Group {
       readonly at: number
    }
    readonly waitFor?: { readonly turn: number; readonly deadline: number }
-   /** a Stop's `last_assistant_message`, for an elision that starts once B settles */
+   /** the Stop's `last_assistant_message`, for a Bx that starts once B settles */
    readonly aText?: string
 }
 
@@ -163,7 +161,7 @@ export interface TurnState {
    readonly bRunning: number | undefined
    readonly bBlockedUntil: number | undefined
    readonly bFailures: number
-   /** B's elision turn in flight; B takes no new turn until it is rewound */
+   /** Bx in flight: B takes no new turn until it is rewound */
    readonly bx:
       | { readonly turn: number; readonly lastAssistantMessage: string | undefined }
       | undefined
@@ -359,7 +357,7 @@ class Machine {
       const aText = event.lastAssistantMessage
       this.state = { ...this.state, aRunning: false, aOwed: Math.max(0, owed - 1) }
       const candidate = [...this.state.bTurns].reverse().find((t) => !t.displayed)
-      // prompts held back by an elision turn get their B turn later; this Stop waits for it
+      // prompts held back by Bx get their B turn later; wait for that
       const queued =
          candidate === undefined &&
          this.state.bx !== undefined &&
@@ -516,7 +514,6 @@ class Machine {
    #display(turn: number, aText: string | undefined): Reply {
       this.#updateTurn(turn, (t) => ({ ...t, displayed: true }))
       const shown = this.#turn(turn)
-      // no elision turn for an errored, aborted or empty answer, nor while B is occupied
       if (
          this.#config.bx &&
          shown?.outcome === "completed" &&
