@@ -11,10 +11,9 @@ export type BlockKind =
    | "hr"
    | "other"
 
-/** One display unit of a markdown answer: the unit of elision and of chunk packing. */
 export interface Block {
    readonly kind: BlockKind
-   /** Source text, verbatim except for trailing newlines and CRLF → LF. */
+   /** verbatim, minus trailing newlines; CRLF → LF */
    readonly raw: string
 }
 
@@ -37,8 +36,7 @@ export function splitBlocks(markdown: string): Block[] {
    } catch {
       return wholeAnswer(source)
    }
-   // The lexer is upstream code; if its raw spans ever stop tiling the input, losing text
-   // would be worse than losing elision.
+   // if upstream raw spans ever stop tiling the input, lose elision rather than text
    if (tokens.map((t) => t.raw).join("") !== source) return wholeAnswer(source)
 
    return tokens.flatMap((token): Block[] => {

@@ -2,13 +2,13 @@ import { splitBlocks } from "./blocks.ts"
 import type { Trail, TrailItem } from "./trail.ts"
 import { isRecord } from "./validate.ts"
 
-/** Truncation priority, highest first: frame, then prose, then tool lines (see chunk.ts). */
+/** truncation priority, highest first (chunk.ts) */
 export type SegmentKind = "frame" | "prose" | "tool"
 
 export interface Segment {
    readonly kind: SegmentKind
    readonly text: string
-   /** A shorter rendering that loses nothing, because the detail is in the store. */
+   /** lossless shorter form: the detail is in the store */
    readonly compact?: string
 }
 
@@ -16,10 +16,9 @@ export interface PeerPackage {
    readonly segments: readonly Segment[]
 }
 
-/** Stores text and returns a path the receiving model can read. */
 export type Refer = (text: string) => string
 
-// Phrased as facts: imperative out-of-band text can trip Claude Code's prompt-injection defences.
+// facts, not imperatives: out-of-band commands trip CC's prompt-injection defences
 const OPENING =
    "[peer answer] What follows is an independent answer to the previous turn from a peer model " +
    "that worked on the same prompt in parallel. It is not endorsed by the human. Its tool " +
@@ -145,8 +144,7 @@ type FileEffect =
    | { kind: "edit"; path: string; hunks: Hunk[]; replaceAll: boolean }
 type Hunk = { old: string; new: string }
 
-/** Recognises both vocabularies: Claude Code (`Edit`, `MultiEdit`, `Write`; `file_path`,
- * `old_string`) and pi (`edit`, `write`; `path`, `edits[].oldText`). */
+// CC: Edit/MultiEdit/Write, file_path, old_string. pi: edit/write, path, edits[].oldText
 function fileEffect(name: string, input: unknown): FileEffect | undefined {
    if (!isRecord(input)) return undefined
    const path = typeof input.file_path === "string" ? input.file_path : input.path

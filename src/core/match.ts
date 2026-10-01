@@ -9,7 +9,6 @@ export interface ElisionPlan {
    readonly matches: readonly AnchorMatch[]
 }
 
-/** Each anchor elides the one block whose words it prefixes. Anything less certain keeps. */
 export function matchAnchors(
    blocks: readonly Block[],
    anchors: readonly string[],
@@ -30,9 +29,8 @@ export function matchAnchors(
    return { elided, matches }
 }
 
-/** Comparison form of markdown text: lowercase letter/digit runs only. Ignoring punctuation
- * entirely subsumes smart-vs-straight quotes, dashes, emphasis and inline-code markers. Block
- * markers that are digits (ordered lists) and fence info strings are words, so those go first. */
+// letter/digit runs only: subsumes quotes, dashes, emphasis, inline code. Ordered-list numbers and
+// fence info strings are words, so they're stripped first
 export function words(text: string): string[] {
    const stripped = text
       .normalize("NFKC")

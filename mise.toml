@@ -1,20 +1,15 @@
-# Pins match versions already installed on the dev machine; nothing here should trigger a download.
-#
-# Tasks run through `cmd /c` on Windows and `sh -c` elsewhere, so a `run` string carries no shell
-# syntax: sequencing is a `run` array, and globs are quoted for node to expand itself.
-#
-# Every task is `raw = true`: agent sessions may export `MISE_TASK_OUTPUT=timed`, whose per-line
-# dwell filter can drop a failing tool's last stdout lines.
+# tasks run via `cmd /c` on Windows: no shell syntax in `run`; quote globs for node
+# `raw = true` everywhere: `MISE_TASK_OUTPUT=timed` (agent sessions) can drop failing tools' last lines
 
 [tools]
-# Node 25 strips types natively; the hooks run `.ts` unbuilt under it.
+# hooks run `.ts` unbuilt via native type stripping
 node = "25.9.0"
 hk = "1.53.0"
 pkl = "0.31.1"
 
 [env]
 _.path = ["{{config_root}}/node_modules/.bin"]
-# Lets hk resolve tools through mise per step, including from the git hook.
+# hk resolves step tools through mise, incl. from the git hook
 HK_MISE = "1"
 
 [tasks.test]

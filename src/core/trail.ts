@@ -1,7 +1,6 @@
-/** A harness-neutral record of what one model did since its peer last heard from it. Private
- * reasoning never enters a trail. */
+// private reasoning never enters a trail
 export type TrailItem =
-   /** A human prompt inside the span, e.g. from a turn the peer never received. */
+   /** a human prompt inside the span, e.g. one the peer never received */
    | { readonly kind: "prompt"; readonly text: string }
    | { readonly kind: "text"; readonly text: string }
    | {
@@ -19,6 +18,6 @@ export type TrailItem =
 
 export interface Trail {
    readonly items: readonly TrailItem[]
-   /** Non-empty when the source was only partly readable, so the trail may be incomplete. */
+   /** non-empty = degraded: source partly unreadable, trail may be incomplete */
    readonly issues: readonly string[]
 }

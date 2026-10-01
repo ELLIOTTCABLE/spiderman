@@ -2,7 +2,6 @@ export type AnchorParse =
    | { readonly kind: "ok"; readonly anchors: readonly string[] }
    | { readonly kind: "unparseable"; readonly reason: string }
 
-/** Extracts `{"elide": [string, …]}` from mediator output that may wrap it in fences or prose. */
 export function parseAnchors(output: string): AnchorParse {
    const candidates = jsonObjectsIn(output).filter(
       (value): value is Record<string, unknown> =>
@@ -29,8 +28,7 @@ function unparseable(reason: string): AnchorParse {
    return { kind: "unparseable", reason }
 }
 
-/** Every top-level `{…}` span that parses as JSON, in order. A span that fails to parse is
- * rescanned from its next character, so stray prose braces can't hide a later object. */
+// an unparseable span is rescanned from its next char, so stray prose braces can't hide a later object
 function jsonObjectsIn(text: string): unknown[] {
    const found: unknown[] = []
    let from = text.indexOf("{")
@@ -48,7 +46,6 @@ function jsonObjectsIn(text: string): unknown[] {
    return found
 }
 
-/** Index of the `}` closing the `{` at `start`, honouring JSON string literals. */
 function balancedEnd(text: string, start: number): number | undefined {
    let depth = 0
    let inString = false

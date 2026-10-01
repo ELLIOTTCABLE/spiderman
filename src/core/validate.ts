@@ -1,6 +1,4 @@
-/** Minimal runtime validators for process boundaries. Validators throw `ValidationError` with a
- * path; `validate` turns that into a result. Unknown object keys are dropped, not rejected, so
- * new upstream fields don't break us. */
+// unknown object keys are dropped, not rejected, so new upstream fields don't break us
 
 export type Result<T> =
    | { readonly ok: true; readonly value: T }
@@ -64,7 +62,7 @@ export interface Optional<T> {
    readonly optional: Validator<T>
 }
 
-/** Absent, `undefined`, and `null` all mean "not given"; the key is then omitted. */
+// absent, undefined, and null all mean "not given"; the key is omitted
 export function optional<T>(validator: Validator<T>): Optional<T> {
    return { optional: validator }
 }
@@ -102,7 +100,6 @@ export function object<S extends Shape>(shape: S): Validator<ObjectOf<S>> {
    }
 }
 
-/** A union discriminated by a string tag, e.g. `{ kind: "a", … } | { kind: "b", … }`. */
 export function tagged<K extends string, M extends Record<string, Validator<object>>>(
    tag: K,
    variants: M,

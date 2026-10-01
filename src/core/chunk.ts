@@ -1,32 +1,23 @@
 import type { PeerPackage, Segment } from "./package.ts"
 
-/** Claude Code caps each hook string at 10,000 characters; beyond that the model sees only a
- * 2,000-character preview. The margin absorbs any wrapping Claude Code adds. */
+// CC caps each hook string at 10k chars (over: 2k preview + a file the model isn't told to read)
 export const CHUNK_CHARS = 9_500
 
-/** Each chunk is one more `UserPromptSubmit` hook, and every delivered character is replayed in
- * A's context on every later request. Four chunks (~38k characters, ~9k tokens) hold a long
- * answer with its tool trail; past that the full package is on disk, one pointer away. */
+// every delivered char is replayed in A's context on every later request; ~38k chars holds a
+// long answer with its trail, and the rest is one pointer away on disk
 export const MAX_CHUNKS = 4
 
 export interface ChunkOptions {
    readonly maxChunks: number
    readonly maxChars: number
-   /** Where the full, unshortened package is saved. */
    readonly fullPath: string
 }
 
-/**
- * Splits a package into at most `maxChunks` chunks labelled `[peer k/K]`, each at most
- * `maxChars` long, breaking between segments where possible. Hooks merge in completion order,
- * hence the labels.
- *
- * When the package is too long, it shrinks in steps, losing the least first:
- * 1. inline diffs become one-line references (lossless: the diff is in the store);
- * 2. tool lines are dropped, since each only points at a file, while prose is the answer;
- * 3. prose is cut at the end.
- * Steps 2 and 3 end the last chunk with a pointer to the full package.
- */
+// labelled because hooks merge in completion order. Over budget, shrink losing the least first:
+// 1. inline diffs → one-line refs (lossless: diff is in the store)
+// 2. drop tool lines (each only points at a file; prose is the answer)
+// 3. cut prose at the end
+// 2 and 3 end the last chunk with a pointer to the full package
 export function chunkPackage(pkg: PeerPackage, options: ChunkOptions): string[] {
    const { maxChunks, maxChars, fullPath } = options
    const label = (k: number, count: number) => `[peer ${k}/${count}]\n`
@@ -72,7 +63,6 @@ function withoutTools(segments: readonly Segment[]): Segment[] {
    return kept
 }
 
-/** Greedy packing; a segment that can't fit even an empty chunk is split at lines, then hard. */
 function pack(segments: readonly Segment[], budget: number): string[] {
    const chunks: string[] = []
    let current = ""

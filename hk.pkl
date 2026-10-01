@@ -2,8 +2,7 @@ amends "package://github.com/jdx/hk/releases/download/v1.53.0/hk@1.53.0#/Config.
 
 default_branch = "ai/main"
 
-// Staged paths only, so the hook stays well under its ~3 s budget; the full lint and typecheck
-// belong to `mise run gate`.
+// staged paths only (~3 s budget); full lint + typecheck is `mise run gate`
 local linters = new Mapping<String, Step> {
    ["biome"] {
       glob = List("*.ts", "*.js", "*.mjs", "*.json", "*.jsonc")
@@ -13,8 +12,7 @@ local linters = new Mapping<String, Step> {
 }
 
 hooks {
-   // Check-only and stash-free: the hook must never rewrite the tree under a running agent, and
-   // the stash stack is shared by every worktree.
+   // never rewrite the tree under a running agent; stash stack is shared across worktrees
    ["pre-commit"] {
       fix = false
       stash = "none"

@@ -1,13 +1,8 @@
 import type { Trail, TrailItem } from "./trail.ts"
 import { isRecord } from "./validate.ts"
 
-/**
- * Builds a trail from pi `AgentMessage`s (ref-pi-api §3). Typed as `unknown` because other
- * extensions can add message roles, and a trail is worth more partial than not at all.
- *
- * User messages are skipped: in B's session every one is the extension's own injection of A's
- * package and the human's prompt, which A already has.
- */
+// `unknown`: other extensions add message roles. User messages are skipped: in B's session each
+// is our own injection of A's package + the human's prompt, which A already has
 export function piTrail(messages: readonly unknown[]): Trail {
    const items: TrailItem[] = []
    const issues: string[] = []

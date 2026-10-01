@@ -2,8 +2,7 @@ import type { AnchorParse } from "./anchors.ts"
 import { splitBlocks } from "./blocks.ts"
 import { matchAnchors } from "./match.ts"
 
-/** The peer answer as the human reads it. Only the header and `[n¶ elided]` markers are added;
- * every other character comes from the answer itself. */
+// adds only the header and `[n¶ elided]` markers; never invents content
 export function renderElided(answer: string, parse: AnchorParse): string {
    const blocks = splitBlocks(answer)
    if (parse.kind === "unparseable") {

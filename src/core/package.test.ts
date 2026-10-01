@@ -19,7 +19,6 @@ function trail(...items: TrailItem[]): Trail {
    return { items, issues: [] }
 }
 
-/** The segments between the opening frame and the end marker. */
 function body(text: string): string[] {
    return text.split("\n\n").slice(1, -1)
 }

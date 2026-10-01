@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { ccTrail } from "./cc-trail.ts"
 
-// Synthetic entries shaped after ref-cc-hooks §8 (observed keys); no real transcript content.
+// synthetic, shaped after ref-cc-hooks §8; never real transcripts (private data)
 const base = { sessionId: "s", cwd: "C:/p", version: "2.1.286", isSidechain: false }
 let n = 0
 const uuid = () => `u${++n}`

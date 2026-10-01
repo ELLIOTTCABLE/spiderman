@@ -4,19 +4,14 @@ import { isRecord } from "./validate.ts"
 export type Cursor = { readonly promptId: string } | { readonly uuid: string }
 
 export interface Span {
-   /** Start after the first entry this matches; from the top of the file when absent. */
+   /** exclusive: start after the first match; absent = top of file */
    readonly after?: Cursor
-   /** Stop before the first later entry this matches; at the end of the file when absent. */
+   /** exclusive: stop before the first later match; absent = end of file */
    readonly until?: Cursor
 }
 
-/**
- * Builds a trail from a Claude Code transcript JSONL (ref-cc-hooks §8). The format is
- * undocumented and changes between versions: unknown entry and block types are ignored, and
- * anything malformed is reported in `issues` rather than thrown.
- *
- * Attachments are never read; among them are the peer packages this harness injected.
- */
+// undocumented, version-volatile format (ref-cc-hooks §8): ignore the unknown, report the malformed
+// attachments are never read: they include the peer packages this harness injected
 export function ccTrail(jsonl: string, span: Span = {}): Trail {
    const issues: string[] = []
    const entries: { line: number; entry: Record<string, unknown> }[] = []
@@ -86,7 +81,6 @@ function assistantItems(entry: Record<string, unknown>): TrailItem[] | undefined
    return items
 }
 
-/** A user entry is either the human's prompt or a batch of tool results. */
 function userItems(entry: Record<string, unknown>): TrailItem[] | undefined {
    const content = isRecord(entry.message) ? entry.message.content : undefined
    if (typeof content === "string") return [{ kind: "prompt", text: content }]
