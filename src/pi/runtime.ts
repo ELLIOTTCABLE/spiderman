@@ -186,7 +186,6 @@ export class Runtime {
       return this.#bx !== undefined
    }
 
-   /** the human's prompts in a message we sent B; undefined if we never sent it */
    carriedPrompts(text: string): readonly string[] | undefined {
       const hash = this.#carrier(text)
       return this.#ledger.find((d) => d.to === "b" && d.chunks.includes(hash))?.prompts
