@@ -25,7 +25,14 @@ function fakePi(
    ])
    const sent: string[] = []
    const notices: string[] = []
-   const branch: { type: string; id: string; message?: unknown }[] = []
+   const branch: {
+      type: string
+      id: string
+      message?: unknown
+      customType?: string
+      data?: unknown
+   }[] = []
+   const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>()
    const ctx = {
       cwd,
       model: { provider, id: "gpt-6-astra" },
@@ -48,12 +55,27 @@ function fakePi(
          },
       },
       isIdle: () => true,
+      abort: () => {},
       ui: { notify: (message: string) => void notices.push(message) },
       sessionManager: {
          getSessionFile: () => undefined,
          getSessionId: () => "pi-session",
          getLeafId: () => branch.at(-1)?.id ?? null,
+         getLeafEntry: () => branch.at(-1),
          getBranch: () => branch,
+      },
+   }
+   // what pi gives command handlers: tree navigation, guarded by session_before_tree
+   const commandCtx = {
+      ...ctx,
+      async navigateTree(targetId: string) {
+         const verdict = handlers.get("session_before_tree")?.(
+            { type: "session_before_tree", preparation: { targetId } },
+            ctx,
+         ) as { cancel?: boolean } | undefined
+         if (verdict?.cancel) return { cancelled: true }
+         branch.splice(branch.findIndex((e) => e.id === targetId) + 1)
+         return { cancelled: false }
       },
    }
    const pi = {
@@ -62,13 +84,39 @@ function fakePi(
       },
       getFlag: (name: string) => flags.get(name),
       on: (event: string, handler: Handler) => void handlers.set(event, handler),
-      sendUserMessage: (text: string) => void sent.push(text),
+      registerCommand: (
+         name: string,
+         options: { handler: (args: string, ctx: unknown) => Promise<void> },
+      ) => void commands.set(name, options.handler),
+      sendUserMessage(text: string, options?: { expandPromptTemplates?: boolean }) {
+         const [, name, args] = /^\/(\S+)\s*(.*)$/s.exec(text) ?? []
+         const command = name === undefined ? undefined : commands.get(name)
+         // pi runs an extension command instead of sending it, once the settle is done
+         if (options?.expandPromptTemplates && command !== undefined)
+            setImmediate(() => void command(args ?? "", commandCtx))
+         else sent.push(text)
+      },
+      appendEntry: (customType: string, data: unknown) =>
+         void branch.push({ type: "custom", id: `c${branch.length}`, customType, data }),
    }
    spiderman(pi as unknown as ExtensionAPI)
    const emit = (event: string, payload: unknown = {}) =>
       handlers.get(event)?.(payload, ctx)
-   return { emit, sent, notices, branch, elisions }
+   const command = (name: string, args: string) => commands.get(name)?.(args, commandCtx)
+   return { emit, sent, notices, branch, elisions, command }
 }
+
+async function until(condition: () => boolean) {
+   for (let i = 0; i < 200 && !condition(); i++)
+      await new Promise((resolve) => setImmediate(resolve))
+   assert.ok(condition(), "condition never held")
+}
+
+const assistant = (id: string, text: string) => ({
+   type: "message",
+   id,
+   message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" },
+})
 
 async function post(cwd: string, body: unknown): Promise<HookReply> {
    const peer = JSON.parse(readFileSync(join(cwd, ".spiderman", "peer.json"), "utf8"))
@@ -250,5 +298,95 @@ test("a mediator override resolves exactly and stays inside the provider allowli
          await pi.emit("session_shutdown", { reason: "quit" })
          rmSync(cwd, { recursive: true, force: true })
       }
+   }
+})
+
+test("Bx: B's own turn picks the elided paragraphs, then B is rewound to before that turn", async () => {
+   const cwd = mkdtempSync(join(tmpdir(), "spiderman-ext-"))
+   const pi = fakePi(cwd, "openai-codex", { "spiderman-strategy": "bx" })
+   try {
+      await pi.emit("session_start", { reason: "startup" })
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+      await post(cwd, {
+         kind: "prompt",
+         prompt: "U1",
+         promptId: "p1",
+         part: { index: 1, count: 1 },
+         ...common,
+      })
+      pi.emit("agent_start")
+      pi.branch.push(assistant("m1", "Same as A.\n\nOnly B says this."))
+      pi.emit("agent_settled")
+      const shown = post(cwd, {
+         kind: "stop",
+         lastAssistantMessage: "Same as A.",
+         promptId: "p1",
+         part: { index: 1, count: 1 },
+         ...common,
+      })
+      await until(() => pi.sent.length === 2)
+      assert.match(
+         pi.sent[1] ?? "",
+         /^\[elision request[\s\S]*\n1: "Same as A\."\n2: "Only B says this\."\n/,
+      )
+
+      pi.emit("agent_start")
+      pi.branch.push({
+         type: "message",
+         id: "bx-u",
+         message: { role: "user", content: [{ type: "text", text: pi.sent[1] }] },
+      })
+      pi.branch.push(assistant("bx-a", "1"))
+      pi.emit("agent_settled")
+      assert.match(
+         (await shown).systemMessage ?? "",
+         /\[elided: "Same as A\."\]\n\nOnly B says this\.$/,
+      )
+
+      await until(() => pi.branch.at(-1)?.type === "custom")
+      assert.deepEqual(
+         pi.branch.map((e) => e.id),
+         ["m1", "c1"],
+         "the elision exchange is off the branch; a marker entry pins the leaf",
+      )
+      assert.deepEqual(pi.branch.at(-1)?.data, { from: "bx-a", to: "m1" })
+      assert.equal(pi.sent.length, 2, "the rewind command is never a message to B")
+      assert.deepEqual(pi.notices, [], "our own navigation passes the /tree guard")
+      assert.deepEqual(
+         pi.emit("session_before_tree", { preparation: { targetId: "m1" } }),
+         {
+            cancel: true,
+         },
+      )
+   } finally {
+      await pi.emit("session_shutdown", { reason: "quit" })
+      rmSync(cwd, { recursive: true, force: true })
+   }
+})
+
+test("the rewind command does nothing unless spiderman itself asked for it", async () => {
+   const pi = fakePi("unused", "openai-codex", { "spiderman-strategy": "bx" })
+   pi.branch.push(assistant("m1", "x"), assistant("m2", "y"))
+   await pi.command("spiderman-rewind", "guess")
+   assert.deepEqual(
+      pi.branch.map((e) => e.id),
+      ["m1", "m2"],
+   )
+   assert.match(pi.notices[0] ?? "", /run by spiderman itself/)
+})
+
+test("an unknown strategy turns elision off, with a notice", async () => {
+   const cwd = mkdtempSync(join(tmpdir(), "spiderman-ext-"))
+   const pi = fakePi(cwd, "openai-codex", { "spiderman-strategy": "Bx " })
+   try {
+      assert.match(await displayedTurn(pi, cwd), /full text: \S+\n\nB's answer\.$/)
+      assert.deepEqual(pi.elisions, [])
+      assert.match(
+         pi.notices[0] ?? "",
+         /unknown --spiderman-strategy Bx ; elision is off/,
+      )
+   } finally {
+      await pi.emit("session_shutdown", { reason: "quit" })
+      rmSync(cwd, { recursive: true, force: true })
    }
 })

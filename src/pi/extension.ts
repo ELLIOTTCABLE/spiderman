@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import {
    appendFileSync,
    existsSync,
@@ -19,14 +20,20 @@ import { STANDING_FOR_B } from "../core/standing.ts"
 import { sha256Hex } from "../core/store.ts"
 import { defaultTurnConfig } from "../core/turns.ts"
 import { type PeerFileFs, removePeerFile, writePeerFile } from "./peer-file.ts"
-import { type BSide, Runtime, type RuntimeFs } from "./runtime.ts"
+import {
+   type BSide,
+   type Elision,
+   type Outcome,
+   Runtime,
+   type RuntimeFs,
+} from "./runtime.ts"
 import { type HookServer, startHookServer } from "./server.ts"
 
 const FLAGS = {
    strategy: {
       name: "spiderman-strategy",
       default: "mediator",
-      help: "elision: mediator | off",
+      help: "elision: mediator (a stateless call) | bx (a turn in B's session, rewound) | off",
    },
    mediator: {
       name: "spiderman-mediator",
@@ -54,6 +61,10 @@ const FLAGS = {
       help: "prompt prefix that skips B for a turn",
    },
 } as const
+
+const STRATEGIES: readonly string[] = ["mediator", "bx", "off"]
+const REWIND_COMMAND = "spiderman-rewind"
+const REWIND_ENTRY = "spiderman-rewind"
 
 interface Session {
    readonly server: HookServer
@@ -101,6 +112,42 @@ export default function spiderman(pi: ExtensionAPI): void {
    }
 
    let session: Session | undefined
+   let rewinding:
+      | { nonce: string; target: string; resolve: (outcome: Outcome) => void }
+      | undefined
+   /** the one tree navigation the /tree guard lets through: our own rewind */
+   let treeTarget: string | undefined
+
+   pi.registerCommand(REWIND_COMMAND, {
+      description: "spiderman's own: rewinds B over its elision turn",
+      handler: async (args, ctx) => {
+         const pending = rewinding
+         if (pending === undefined || args.trim() !== pending.nonce) {
+            ctx.ui.notify(
+               "spiderman: this command is run by spiderman itself.",
+               "warning",
+            )
+            return
+         }
+         rewinding = undefined
+         const from = ctx.sessionManager.getLeafId()
+         treeTarget = pending.target
+         try {
+            const { cancelled } = await ctx.navigateTree(pending.target)
+            if (cancelled) return pending.resolve({ ok: false, reason: "cancelled" })
+            // pi keeps the leaf in memory only; a reload resumes at the file's last entry
+            pi.appendEntry(REWIND_ENTRY, { from, to: pending.target })
+            pending.resolve({ ok: true })
+         } catch (error) {
+            pending.resolve({
+               ok: false,
+               reason: error instanceof Error ? error.message : String(error),
+            })
+         } finally {
+            treeTarget = undefined
+         }
+      },
+   })
 
    const stop = async () => {
       const current = session
@@ -129,6 +176,13 @@ export default function spiderman(pi: ExtensionAPI): void {
          } catch {}
       }
       const live = () => session?.ctx ?? ctx
+      const strategy = STRATEGIES.includes(flag("strategy")) ? flag("strategy") : "off"
+      if (strategy !== flag("strategy")) {
+         ctx.ui.notify(
+            `spiderman: unknown --spiderman-strategy ${flag("strategy")}; elision is off.`,
+            "warning",
+         )
+      }
 
       const b: BSide = {
          send(text) {
@@ -146,6 +200,29 @@ export default function spiderman(pi: ExtensionAPI): void {
             return { ok: true }
          },
          leafId: () => live().sessionManager.getLeafId() ?? undefined,
+         rewindPoint() {
+            const entry = live().sessionManager.getLeafEntry()
+            // navigateTree lands on the parent of these, and puts their text in the editor
+            if (
+               entry === undefined ||
+               entry.type === "custom_message" ||
+               (entry.type === "message" && entry.message.role === "user")
+            )
+               return undefined
+            return entry.id
+         },
+         rewind(entryId) {
+            return new Promise((resolve) => {
+               rewinding?.resolve({ ok: false, reason: "superseded" })
+               const nonce = randomUUID()
+               rewinding = { nonce, target: entryId, resolve }
+               // tree navigation is command-only; from agent_settled, pi runs this after the settle
+               pi.sendUserMessage(`/${REWIND_COMMAND} ${nonce}`, {
+                  expandPromptTemplates: true,
+               })
+            })
+         },
+         abort: () => live().abort(),
          messagesSince(leaf) {
             const branch = live().sessionManager.getBranch()
             const at = leaf === undefined ? -1 : branch.findIndex((e) => e.id === leaf)
@@ -179,9 +256,10 @@ export default function spiderman(pi: ExtensionAPI): void {
          projectDir: ctx.cwd,
          sessionId: ctx.sessionManager.getSessionId(),
          b,
-         ...(flag("strategy") === "off"
-            ? {}
-            : { mediate: mediator(live, flag("mediator"), providers, log) }),
+         elision:
+            strategy === "mediator"
+               ? { strategy, mediate: mediator(live, flag("mediator"), providers, log) }
+               : ({ strategy } as Elision),
          log,
          config: {
             ...defaultTurnConfig,
@@ -190,6 +268,7 @@ export default function spiderman(pi: ExtensionAPI): void {
             stopWaitMs: seconds("stopWait"),
             chunkDelayMs: 250,
             startTimeoutMs: 15_000,
+            bx: strategy === "bx",
          },
       })
       const server = await startHookServer((request) => runtime.handle(request))
@@ -222,7 +301,8 @@ export default function spiderman(pi: ExtensionAPI): void {
          : { systemPrompt: event.systemPrompt + STANDING_FOR_B },
    )
    // /tree moves B's leaf under the protocol and skips the input swallow; /fork re-pairs fine
-   pi.on("session_before_tree", (_event, ctx) => {
+   pi.on("session_before_tree", (event, ctx) => {
+      if (treeTarget !== undefined && event.preparation.targetId === treeTarget) return
       ctx.ui.notify(
          "spiderman: type in Claude Code. /tree here would desync the peer.",
          "warning",

@@ -3,9 +3,23 @@ import { test } from "node:test"
 import type { HookRequest } from "../core/protocol.ts"
 import { sha256Hex } from "../core/store.ts"
 import { defaultTurnConfig } from "../core/turns.ts"
-import { type BSide, Runtime, type RuntimeDeps, type RuntimeFs } from "./runtime.ts"
+import {
+   type BSide,
+   type Elision,
+   type Outcome,
+   Runtime,
+   type RuntimeFs,
+} from "./runtime.ts"
 
-function harness(options: { mediate?: RuntimeDeps["mediate"]; refuse?: number } = {}) {
+function harness(
+   options: {
+      elision?: Elision
+      refuse?: number
+      /** refuses only the elision prompt, with this reason */
+      refuseBx?: string
+      rewind?: () => Promise<Outcome>
+   } = {},
+) {
    let now = 0
    const timers: { at: number; run: () => void; live: boolean }[] = []
    const files = new Map<string, string>()
@@ -25,17 +39,29 @@ function harness(options: { mediate?: RuntimeDeps["mediate"]; refuse?: number } 
    const sent: string[] = []
    const scripted = new Map<number, unknown[]>()
    let refusals = options.refuse ?? 0
+   /** sends, rewinds and aborts, in the order B saw them */
+   const seen: string[] = []
+   const logs: Record<string, unknown>[] = []
    const b: BSide = {
       send(text) {
          if (refusals > 0) {
             refusals--
             return { ok: false, reason: "compacting" }
          }
+         if (options.refuseBx !== undefined && text.startsWith("[elision request"))
+            return { ok: false, reason: options.refuseBx }
          sent.push(text)
+         seen.push(`send ${sent.length}`)
          return { ok: true }
       },
       leafId: () => `leaf-${sent.length}`,
+      rewindPoint: () => `leaf-${sent.length}`,
       messagesSince: () => scripted.get(sent.length) ?? [],
+      rewind(entryId) {
+         seen.push(`rewind ${entryId}`)
+         return options.rewind?.() ?? Promise.resolve({ ok: true })
+      },
+      abort: () => void seen.push("abort"),
    }
    const runtime = new Runtime({
       now: () => now,
@@ -51,14 +77,15 @@ function harness(options: { mediate?: RuntimeDeps["mediate"]; refuse?: number } 
       projectDir: "P",
       sessionId: "s1",
       b,
-      ...(options.mediate === undefined ? {} : { mediate: options.mediate }),
-      log: () => {},
+      elision: options.elision ?? { strategy: "off" },
+      log: (entry) => void logs.push(entry),
       config: {
          ...defaultTurnConfig,
          promptWaitMs: 1_000,
          retryMs: 100,
          chunkDelayMs: 250,
          startTimeoutMs: 5_000,
+         bx: options.elision?.strategy === "bx",
       },
    })
    const flush = () => new Promise((resolve) => setImmediate(resolve))
@@ -78,7 +105,7 @@ function harness(options: { mediate?: RuntimeDeps["mediate"]; refuse?: number } 
          "t.jsonl",
          `${(files.get("t.jsonl") ?? "") + entries.map((e) => JSON.stringify(e)).join("\n")}\n`,
       )
-   return { runtime, files, sent, scripted, advance, transcript }
+   return { runtime, files, sent, scripted, advance, transcript, seen, logs, flush }
 }
 
 const base = { ccSessionId: "cc1", transcriptPath: "t.jsonl", cwd: "P" }
@@ -115,9 +142,12 @@ const bReply = (text: string) => [
 test("a full turn: standing context, B in parallel, elided display, then delivery to A", async () => {
    const asked: string[][] = []
    const h = harness({
-      mediate: async (a, b) => {
-         asked.push([a, b])
-         return "1"
+      elision: {
+         strategy: "mediator",
+         mediate: async (a, b) => {
+            asked.push([a, b])
+            return "1"
+         },
       },
    })
    assert.deepEqual(
@@ -168,8 +198,11 @@ test("a full turn: standing context, B in parallel, elided display, then deliver
 
 test("a mediator failure shows B in full, flagged", async () => {
    const h = harness({
-      mediate: async () => {
-         throw new Error("model not found")
+      elision: {
+         strategy: "mediator",
+         mediate: async () => {
+            throw new Error("model not found")
+         },
       },
    })
    h.transcript(userEntry("U1", "p1"))
@@ -323,4 +356,142 @@ test("a short sentence A repeats verbatim in a later turn still reaches B", asyn
    await h.runtime.handle(stop("p2", "Done."))
    await h.runtime.handle(prompt("U3", "p3"))
    assert.match(h.sent[2] ?? "", /Done\.[\s\S]*\[the human's message\]\nU3$/)
+})
+
+const bx = { strategy: "bx" } as const
+const logged = (logs: Record<string, unknown>[], what: string) =>
+   logs.flatMap(({ what: w, at: _at, ...rest }) => (w === what ? [rest] : []))
+
+/** B answered U1 and A stopped: the display now waits on B's elision turn, already sent. */
+async function elisionPending(h: ReturnType<typeof harness>) {
+   h.transcript(userEntry("U1", "p1"))
+   await h.runtime.handle(prompt("U1", "p1"))
+   h.runtime.bStarted()
+   h.scripted.set(1, bReply("Same as A.\n\nOnly B says this."))
+   h.runtime.bSettled()
+   h.transcript(aText("Same as A.", "a1"))
+   const display = h.runtime.handle(stop("p1", "Same as A."))
+   await h.flush()
+   h.transcript(userEntry("U2", "p2"))
+   await h.runtime.handle(prompt("U2", "p2"))
+   // wrapped: an async function returning a promise would wait for it
+   return { display }
+}
+
+test("Bx: the display waits on B's elision turn; B is rewound before its next turn", async () => {
+   const h = harness({ elision: bx })
+   const { display } = await elisionPending(h)
+   assert.match(
+      h.sent[1] ?? "",
+      /^\[elision request[\s\S]*<answer_a>\nSame as A\.\n<\/answer_a>[\s\S]*\n1: "Same as A\."\n2: "Only B says this\."\n/,
+   )
+   assert.equal(h.sent.length, 2, "U2 is held while B elides")
+
+   h.runtime.bStarted()
+   h.scripted.set(2, [
+      { role: "user", content: "the elision request" },
+      {
+         role: "assistant",
+         content: [{ type: "text", text: "1" }],
+         stopReason: "stop",
+         usage: { input: 1_900, cacheRead: 1_792, output: 3 },
+      },
+   ])
+   h.runtime.bSettled()
+   assert.match(
+      (await display).systemMessage ?? "",
+      /\[elided: "Same as A\."\]\n\nOnly B says this\.$/,
+   )
+   await h.flush()
+   assert.deepEqual(h.seen, ["send 1", "send 2", "rewind leaf-1", "send 3"])
+   assert.match(h.sent[2] ?? "", /\[the human's message\]\nU2$/)
+   assert.doesNotMatch(h.sent[2] ?? "", /elision request/)
+   assert.deepEqual(logged(h.logs, "bx"), [
+      {
+         turn: 1,
+         sent: true,
+         outcome: "completed",
+         reply: "1",
+         usage: { input: 1_900, cacheRead: 1_792, output: 3 },
+         rewind: "ok",
+         bxMs: 0,
+      },
+   ])
+   assert.deepEqual(
+      logged(h.logs, "display").map((d) => [d.strategy, d.indices, d.elided, d.vetoed]),
+      [["bx", [1], [1], []]],
+   )
+})
+
+test("Bx: an errored or unparseable elision turn shows B in full, flagged, and still rewinds", async () => {
+   for (const [reply, flag] of [
+      [
+         [{ role: "assistant", content: [], stopReason: "error" }],
+         "elision turn failed: B's turn error",
+      ],
+      [bReply("Probably the first one."), "no line of paragraph numbers or none"],
+   ] as const) {
+      const h = harness({ elision: bx })
+      const { display } = await elisionPending(h)
+      h.runtime.bStarted()
+      h.scripted.set(2, [...reply])
+      h.runtime.bSettled()
+      assert.equal(
+         (await display).systemMessage?.split("\n\n")[1],
+         `[elision unavailable (${flag}); shown in full]`,
+      )
+      await h.flush()
+      assert.deepEqual(h.seen, ["send 1", "send 2", "rewind leaf-1", "send 3"])
+   }
+})
+
+test("Bx: a slow elision turn is given up for display and stopped; its settle still rewinds", async () => {
+   const h = harness({ elision: bx })
+   const { display } = await elisionPending(h)
+   h.runtime.bStarted()
+   await h.advance(90_000)
+   assert.match((await display).systemMessage ?? "", /elision turn failed: timed out/)
+   assert.deepEqual(h.seen, ["send 1", "send 2", "abort"])
+   h.scripted.set(2, [{ role: "assistant", content: [], stopReason: "aborted" }])
+   h.runtime.bSettled()
+   await h.flush()
+   assert.deepEqual(h.seen, ["send 1", "send 2", "abort", "rewind leaf-1", "send 3"])
+})
+
+test("Bx: a refused or never-started elision turn needs no rewind and frees B", async () => {
+   const refused = harness({ elision: bx, refuseBx: "busy" })
+   const { display: shown } = await elisionPending(refused)
+   assert.match((await shown).systemMessage ?? "", /elision turn failed: not sent: busy/)
+   await refused.flush()
+   assert.deepEqual(refused.seen, ["send 1", "send 2"])
+   assert.match(refused.sent[1] ?? "", /U2$/)
+
+   const stalled = harness({ elision: bx })
+   const { display } = await elisionPending(stalled)
+   await stalled.advance(5_000)
+   assert.match(
+      (await display).systemMessage ?? "",
+      /elision turn failed: B did not start it/,
+   )
+   assert.deepEqual(stalled.seen, ["send 1", "send 2", "send 3"])
+})
+
+test("Bx: a rewind that fails or hangs is logged, and B is freed anyway", async () => {
+   for (const [rewind, result] of [
+      [() => Promise.resolve({ ok: false as const, reason: "cancelled" }), "cancelled"],
+      [() => new Promise<never>(() => {}), "timed out"],
+   ] as const) {
+      const h = harness({ elision: bx, rewind })
+      const { display } = await elisionPending(h)
+      h.runtime.bStarted()
+      h.scripted.set(2, bReply("none"))
+      h.runtime.bSettled()
+      assert.doesNotMatch((await display).systemMessage ?? "", /elided|unavailable/)
+      await h.advance(15_000)
+      assert.deepEqual(
+         logged(h.logs, "bx").map((e) => e.rewind),
+         [result],
+      )
+      assert.match(h.sent[2] ?? "", /U2$/)
+   }
 })
