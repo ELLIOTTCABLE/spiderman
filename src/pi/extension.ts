@@ -149,9 +149,21 @@ export default function spiderman(pi: ExtensionAPI): void {
          messagesSince(leaf) {
             const branch = live().sessionManager.getBranch()
             const at = leaf === undefined ? -1 : branch.findIndex((e) => e.id === leaf)
-            return branch
-               .slice(at + 1)
-               .flatMap((e) => (e.type === "message" ? [e.message] : []))
+            return branch.slice(at + 1).flatMap((e): unknown[] => {
+               if (e.type === "message") return [e.message]
+               // pi-side subagent reports arrive as custom messages
+               return e.type === "custom_message" &&
+                  e.customType === "subagent-notification"
+                  ? [
+                       {
+                          role: "custom",
+                          customType: e.customType,
+                          content: e.content,
+                          details: e.details,
+                       },
+                    ]
+                  : []
+            })
          },
       }
 
@@ -165,6 +177,7 @@ export default function spiderman(pi: ExtensionAPI): void {
          hash: sha256Hex,
          fs: nodeFs,
          projectDir: ctx.cwd,
+         sessionId: ctx.sessionManager.getSessionId(),
          b,
          ...(flag("strategy") === "off"
             ? {}
@@ -208,6 +221,14 @@ export default function spiderman(pi: ExtensionAPI): void {
          ? undefined
          : { systemPrompt: event.systemPrompt + STANDING_FOR_B },
    )
+   // /tree moves B's leaf under the protocol and skips the input swallow; /fork re-pairs fine
+   pi.on("session_before_tree", (_event, ctx) => {
+      ctx.ui.notify(
+         "spiderman: type in Claude Code. /tree here would desync the peer.",
+         "warning",
+      )
+      return { cancel: true }
+   })
    pi.on("agent_start", (_event, ctx) => {
       if (session !== undefined) session.ctx = ctx
       session?.runtime.bStarted()

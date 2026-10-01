@@ -151,3 +151,9 @@ test("B on a provider outside the allowlist is never sent the human's prompt", a
       rmSync(cwd, { recursive: true, force: true })
    }
 })
+
+test("/tree in B's pane is cancelled with a pointer to Claude Code", () => {
+   const pi = fakePi("unused")
+   assert.deepEqual(pi.emit("session_before_tree", {}), { cancel: true })
+   assert.match(pi.notices[0] ?? "", /type in Claude Code/)
+})
