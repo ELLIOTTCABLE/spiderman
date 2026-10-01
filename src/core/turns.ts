@@ -77,6 +77,9 @@ export type TurnEvent =
      }
    /** Bx is over, rewound or failed: B is free */
    | { readonly type: "bxDone"; readonly turn: number }
+   /** the human typed in B's own client: B is busy with a turn of its own */
+   | { readonly type: "asideStarted" }
+   | { readonly type: "asideSettled" }
    /** starting B's turn failed (e.g. compaction in flight, model guard); its prompts go back */
    | { readonly type: "bFailed"; readonly turn: number; readonly reason: string }
    | { readonly type: "tick" }
@@ -84,8 +87,8 @@ export type TurnEvent =
 export type BOutcome = "completed" | "error" | "aborted"
 
 export type Reply =
-   /** B's answers for A, as context */
-   | { readonly kind: "deliver"; readonly turns: readonly number[] }
+   /** B's news for A, as context: derived when rendered; one number per answered group */
+   | { readonly kind: "deliver"; readonly delivery: number }
    /** one B answer, elided, for the human */
    | { readonly kind: "display"; readonly turn: number }
    | { readonly kind: "empty" }
@@ -121,7 +124,6 @@ interface Pending {
 interface BTurn {
    readonly turn: number
    readonly settled: boolean
-   readonly delivered: boolean
    readonly displayed: boolean
    readonly outcome?: BOutcome
    readonly answered?: boolean
@@ -159,6 +161,8 @@ export interface TurnState {
    readonly pending: readonly Pending[]
    readonly bTurns: readonly BTurn[]
    readonly bRunning: number | undefined
+   /** a turn the human started in B's own client */
+   readonly bAside: boolean
    readonly bBlockedUntil: number | undefined
    readonly bFailures: number
    /** Bx in flight: B takes no new turn until it is rewound */
@@ -167,6 +171,7 @@ export interface TurnState {
       | undefined
    readonly groups: readonly Group[]
    readonly nextTurn: number
+   readonly nextDelivery: number
 }
 
 export const initialTurnState: TurnState = {
@@ -177,11 +182,13 @@ export const initialTurnState: TurnState = {
    pending: [],
    bTurns: [],
    bRunning: undefined,
+   bAside: false,
    bBlockedUntil: undefined,
    bFailures: 0,
    bx: undefined,
    groups: [],
    nextTurn: 1,
+   nextDelivery: 1,
 }
 
 const NOT_PAIRED =
@@ -235,6 +242,14 @@ class Machine {
             return this.#bSettled(event.turn, event.outcome, event.answered)
          case "bxDone":
             return this.#bxDone(event.turn)
+         case "asideStarted":
+            this.#log("asideStarted")
+            this.state = { ...this.state, bAside: true }
+            return
+         case "asideSettled":
+            this.#log("asideSettled")
+            this.state = { ...this.state, bAside: false }
+            return
          case "bFailed":
             return this.#bFailed(event.turn, event.reason)
          case "tick":
@@ -347,7 +362,7 @@ class Machine {
             },
          }
       }
-      return { answer: { reply: this.#deliverUndelivered(), at: this.#now } }
+      return { answer: { reply: this.#deliver(), at: this.#now } }
    }
 
    #stop(
@@ -357,10 +372,10 @@ class Machine {
       const aText = event.lastAssistantMessage
       this.state = { ...this.state, aRunning: false, aOwed: Math.max(0, owed - 1) }
       const candidate = [...this.state.bTurns].reverse().find((t) => !t.displayed)
-      // prompts held back by Bx get their B turn later; wait for that
+      // prompts held back by Bx or an aside get their B turn later; wait for that
       const queued =
          candidate === undefined &&
-         this.state.bx !== undefined &&
+         (this.state.bx !== undefined || this.state.bAside) &&
          this.state.pending.length > 0
       this.#log("stop", { owed, candidate: candidate?.turn, queued })
       const group = (): Omit<Group, "key" | "kind" | "waiters"> => {
@@ -428,7 +443,7 @@ class Machine {
                ? turn?.settled
                   ? this.#display(group.waitFor.turn, group.aText)
                   : ({ kind: "empty" } as const)
-               : this.#deliverUndelivered()
+               : this.#deliver()
          const notice = turn?.settled ? undefined : PEER_SLOW
          this.#answer(group, reply, notice)
       }
@@ -441,7 +456,12 @@ class Machine {
    tryStartB(lastAssistantMessage?: string) {
       const { pending, bRunning, bBlockedUntil, aRunning } = this.state
       const first = pending[0]
-      if (first === undefined || bRunning !== undefined || this.state.bx !== undefined)
+      if (
+         first === undefined ||
+         bRunning !== undefined ||
+         this.state.bx !== undefined ||
+         this.state.bAside
+      )
          return
       if (bBlockedUntil !== undefined && this.#now < bBlockedUntil) return
       if (!first.aIdleAtSubmit && aRunning) return
@@ -462,7 +482,6 @@ class Machine {
             {
                turn,
                settled: false,
-               delivered: false,
                displayed: false,
                prompts: pending,
             },
@@ -502,13 +521,10 @@ class Machine {
       return this.#now + room
    }
 
-   #deliverUndelivered(): Reply {
-      const turns = this.state.bTurns
-         .filter((t) => t.settled && !t.delivered)
-         .map((t) => t.turn)
-      if (turns.length === 0) return { kind: "empty" }
-      for (const turn of turns) this.#updateTurn(turn, (t) => ({ ...t, delivered: true }))
-      return { kind: "deliver", turns }
+   #deliver(): Reply {
+      const delivery = this.state.nextDelivery
+      this.state = { ...this.state, nextDelivery: delivery + 1 }
+      return { kind: "deliver", delivery }
    }
 
    #display(turn: number, aText: string | undefined): Reply {
@@ -521,6 +537,7 @@ class Machine {
          aText !== undefined &&
          aText.trim() !== "" &&
          this.state.bRunning === undefined &&
+         !this.state.bAside &&
          this.state.bx === undefined
       ) {
          this.state = { ...this.state, bx: { turn, lastAssistantMessage: aText } }

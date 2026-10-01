@@ -68,9 +68,17 @@ const settled = (
    answered,
 })
 
+// a delivery's number only keys its derivation
 const replies = (effects: TurnEffect[]) =>
    effects.flatMap((e) =>
-      e.type === "respond" ? [{ reply: e.reply, notice: e.notice }] : [],
+      e.type === "respond"
+         ? [
+              {
+                 reply: e.reply.kind === "deliver" ? { kind: "deliver" } : e.reply,
+                 notice: e.notice,
+              },
+           ]
+         : [],
    )
 const starts = (effects: TurnEffect[]) =>
    effects.flatMap((e) =>
@@ -91,7 +99,7 @@ test("common case: B starts at submit; Stop shows B's answer; the next submit de
       [{ reply: { kind: "empty" }, notice: undefined }],
    )
    const first = sim.send(submit("U1", "p1"), 10)
-   assert.deepEqual(replies(first), [{ reply: { kind: "empty" }, notice: undefined }])
+   assert.deepEqual(replies(first), [{ reply: { kind: "deliver" }, notice: undefined }])
    assert.deepEqual(starts(first), [
       { turn: 1, prompts: ["U1"], until: { promptId: "p1" } },
    ])
@@ -100,9 +108,7 @@ test("common case: B starts at submit; Stop shows B's answer; the next submit de
       { reply: { kind: "display", turn: 1 }, notice: undefined },
    ])
    const second = sim.send(submit("U2", "p2"), 40)
-   assert.deepEqual(replies(second), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
-   ])
+   assert.deepEqual(replies(second), [{ reply: { kind: "deliver" }, notice: undefined }])
    assert.deepEqual(starts(second), [
       { turn: 2, prompts: ["U2"], until: { promptId: "p2" } },
    ])
@@ -116,9 +122,7 @@ test("the K chunk hooks of one submit are one event: one B start, the same reply
    const b = sim.send(submit("U2", "p2", {}, 2))
    assert.equal(starts(a).length + starts(b).length, 1)
    assert.deepEqual(replies(a), replies(b))
-   assert.deepEqual(replies(b), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
-   ])
+   assert.deepEqual(replies(b), [{ reply: { kind: "deliver" }, notice: undefined }])
 })
 
 test("stale prompt_ids don't merge different prompts; the same prompt after the window is new", () => {
@@ -145,9 +149,7 @@ test("B slower than the human: an idle-time submit waits for B, capped", () => {
       [{ type: "wake", at: 1_100 }],
    )
    const done = sim.send(settled(1), 600)
-   assert.deepEqual(replies(done), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
-   ])
+   assert.deepEqual(replies(done), [{ reply: { kind: "deliver" }, notice: undefined }])
    assert.deepEqual(starts(done), [
       { turn: 2, prompts: ["U2"], until: { promptId: "p2" } },
    ])
@@ -158,7 +160,7 @@ test("B slower than the cap: the submit goes through with a notice; B catches up
    sim.send(submit("U1", "p1"), 0)
    sim.send(submit("U2", "p2"), 100)
    const capped = sim.send({ type: "tick" }, 1_100)
-   assert.equal(replies(capped)[0]?.reply.kind, "empty")
+   assert.equal(replies(capped)[0]?.reply.kind, "deliver", "whatever B has settled")
    assert.match(replies(capped)[0]?.notice ?? "", /still answering/)
    const late = sim.send(settled(1), 2_000)
    assert.deepEqual(starts(late), [
@@ -166,7 +168,7 @@ test("B slower than the cap: the submit goes through with a notice; B catches up
    ])
    sim.send(settled(2), 3_000)
    assert.deepEqual(replies(sim.send(submit("U3", "p3"), 4_000)), [
-      { reply: { kind: "deliver", turns: [1, 2] }, notice: undefined },
+      { reply: { kind: "deliver" }, notice: undefined },
    ])
 })
 
@@ -191,9 +193,7 @@ test("mid-turn submit: answered at once, and B starts at Stop with A's finished 
    sim.send(submit("U1", "p1"), 0)
    sim.send(settled(1), 10)
    const mid = sim.send(submit("U2", "p1"), 20)
-   assert.deepEqual(replies(mid), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
-   ])
+   assert.deepEqual(replies(mid), [{ reply: { kind: "deliver" }, notice: undefined }])
    assert.deepEqual(starts(mid), [])
    const atStop = sim.send(stop("p1", "A1 text"), 30)
    assert.deepEqual(starts(atStop), [{ turn: 2, prompts: ["U2"], until: "end" }])
@@ -236,9 +236,7 @@ test("solo prefix: B skips the turn, A still gets B's earlier answer", () => {
    sim.send(stop("p1"), 20)
    const solo = sim.send(submit("~quick one", "p2"), 30)
    assert.deepEqual(starts(solo), [])
-   assert.deepEqual(replies(solo), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
-   ])
+   assert.deepEqual(replies(solo), [{ reply: { kind: "deliver" }, notice: undefined }])
    assert.deepEqual(replies(sim.send(stop("p2"), 40)), [
       { reply: { kind: "empty" }, notice: undefined },
    ])
@@ -278,9 +276,7 @@ test("A interrupted (no Stop): a fresh prompt_id means A is idle again", () => {
       "waits for B's turn 1, as an idle-time submit would",
    )
    const done = sim.send(settled(1, "aborted"), 200)
-   assert.deepEqual(replies(done), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
-   ])
+   assert.deepEqual(replies(done), [{ reply: { kind: "deliver" }, notice: undefined }])
    assert.deepEqual(starts(done), [
       { turn: 2, prompts: ["U2"], until: { promptId: "p2" } },
    ])
@@ -291,7 +287,7 @@ test("B errors still settle, so their partial answers are delivered", () => {
    sim.send(submit("U1", "p1"), 0)
    sim.send(settled(1, "error"), 10)
    assert.deepEqual(replies(sim.send(submit("U2", "p2"), 20)), [
-      { reply: { kind: "deliver", turns: [1] }, notice: undefined },
+      { reply: { kind: "deliver" }, notice: undefined },
    ])
 })
 
@@ -391,7 +387,7 @@ test("Bx: a shown answer starts B's elision turn; B takes no new turn until it i
    const next = sim.send(submit("U2", "p2"), 30)
    assert.deepEqual(
       replies(next),
-      [{ reply: { kind: "deliver", turns: [1] }, notice: undefined }],
+      [{ reply: { kind: "deliver" }, notice: undefined }],
       "B's answer is settled, so A gets it at once; the elision turn doesn't hold it",
    )
    assert.deepEqual(starts(next), [])
@@ -466,4 +462,32 @@ test("Bx: a stray bxDone for another turn frees nothing", () => {
    sim.send(submit("U2", "p2"), 30)
    assert.deepEqual(starts(sim.send(bxDone(7), 40)), [])
    assert.equal(sim.state.bx?.turn, 1)
+})
+
+test("an aside typed in B holds the next shared prompt; that prompt's Stop waits for its answer", () => {
+   const sim = new Sim()
+   sim.send(submit("U1", "p1"), 0)
+   sim.send(settled(1), 10)
+   sim.send(stop("p1"), 20)
+   assert.deepEqual(sim.send({ type: "asideStarted" }, 30), [])
+   const next = sim.send(submit("U2", "p2"), 40)
+   assert.deepEqual(replies(next), [{ reply: { kind: "deliver" }, notice: undefined }])
+   assert.deepEqual(starts(next), [])
+   assert.deepEqual(replies(sim.send(stop("p2"), 50)), [])
+   assert.deepEqual(starts(sim.send({ type: "asideSettled" }, 60)), [
+      { turn: 2, prompts: ["U2"], until: { promptId: "p2" } },
+   ])
+   assert.deepEqual(replies(sim.send(settled(2), 70)), [
+      { reply: { kind: "display", turn: 2 }, notice: undefined },
+   ])
+})
+
+test("Bx: no elision turn while the human's own turn runs in B", () => {
+   const sim = new BxSim()
+   sim.send(submit("U1", "p1"), 0)
+   sim.send(settled(1), 10)
+   sim.send({ type: "asideStarted" }, 15)
+   const atStop = sim.send(stop("p1", "A1"), 20)
+   assert.equal(replies(atStop)[0]?.reply.kind, "display")
+   assert.deepEqual(bxStarts(atStop), [])
 })

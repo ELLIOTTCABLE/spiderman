@@ -82,10 +82,10 @@ function ccTrail(
       stop === -1
          ? undefined
          : lines.slice(0, stop).findLast((e) => live.has(String(e.uuid)))
-   return view.trail(
-      start === -1 ? undefined : String(lines[start]?.uuid),
-      through === undefined ? undefined : String(through.uuid),
-   )
+   const ids = view.live.map((e) => e.id)
+   const from = start === -1 ? -1 : ids.indexOf(String(lines[start]?.uuid))
+   const to = through === undefined ? ids.length - 1 : ids.indexOf(String(through.uuid))
+   return view.trail(ids.slice(from + 1, to + 1))
 }
 
 const turn1 = [
@@ -291,7 +291,7 @@ test("entries say what they hold: a prompt, an answer's text, a delivery we sent
       hookName: "UserPromptSubmit",
    })
    const a1 = said("m1", "answer one")
-   const view = ccView(jsonl(p1, hook, a1), { hash: sha256Hex })
+   const view = ccView(jsonl(p1, hook, a1), { carrier: sha256Hex })
    assert.deepEqual(view.live, [
       { id: p1.uuid, content: true, startsTurn: true, prompt: "first", carries: [] },
       {

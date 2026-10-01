@@ -17,9 +17,19 @@ interface Started {
 export interface PiViewOptions {
    /** any entry's parent: null at a root, undefined for an unknown entry */
    readonly parent: (id: string) => string | null | undefined
-   readonly hash: (text: string) => string
-   /** for a message we delivered into this session, by its text's hash: the human messages it carried */
-   readonly delivered: (hash: string) => readonly string[] | undefined
+   /** a delivered text's carrier hash */
+   readonly carrier: (text: string) => string
+   /** a message we delivered into this session, by carrier hash */
+   readonly delivered: (hash: string) => Delivered | undefined
+   /** entries never to deliver, e.g. an elision exchange a failed rewind left behind */
+   readonly never: ReadonlySet<string>
+}
+
+export interface Delivered {
+   /** the human messages it carried */
+   readonly prompts: readonly string[]
+   /** the receiver no longer holds them, so an answer to them must bring its question */
+   readonly asked: boolean
 }
 
 interface Classified {
@@ -27,7 +37,7 @@ interface Classified {
    /** what the entry adds to a trail: a message, a delivery's answer starting, or a Bx exchange */
    readonly as:
       | { readonly kind: "message"; readonly message: unknown }
-      | { readonly kind: "delivery"; readonly prompts: readonly string[] }
+      | { readonly kind: "delivery"; readonly delivered: Delivered }
       | { readonly kind: "bx" }
       | { readonly kind: "none" }
 }
@@ -42,16 +52,16 @@ export function piView(branch: readonly unknown[], options: PiViewOptions): Side
          as: { kind: "none" },
       })
       const message = sessionMessage(raw)
-      if (message === undefined) return [none()]
+      if (message === undefined || options.never.has(id)) return [none()]
       if (message.role === "user") {
          const text = messageText(message.content)
-         const hash = options.hash(text)
-         const prompts = options.delivered(hash)
-         if (prompts !== undefined)
+         const hash = options.carrier(text)
+         const delivered = options.delivered(hash)
+         if (delivered !== undefined)
             return [
                {
                   entry: { id, content: false, startsTurn: true, carries: [hash] },
-                  as: { kind: "delivery", prompts },
+                  as: { kind: "delivery", delivered },
                },
             ]
          if (text.startsWith(BX_MARK)) return [{ ...none(), as: { kind: "bx" } }]
@@ -90,12 +100,8 @@ export function piView(branch: readonly unknown[], options: PiViewOptions): Side
    return {
       live,
       parent: options.parent,
-      trail(after, through) {
-         const from = after === undefined ? -1 : live.findIndex((e) => e.id === after)
-         const to =
-            through === undefined
-               ? live.length - 1
-               : live.findIndex((e) => e.id === through)
+      trail(ids) {
+         const wanted = new Set(ids)
          const items: TrailItem[] = []
          const issues: string[] = []
          let segment: unknown[] = []
@@ -110,15 +116,20 @@ export function piView(branch: readonly unknown[], options: PiViewOptions): Side
             segment = []
             turn = undefined
          }
-         for (const { as } of classified.slice(from + 1, to + 1)) {
+         for (const { entry, as } of classified) {
             if (as.kind === "delivery" || as.kind === "bx") {
                flush()
                inBx = as.kind === "bx"
-               if (as.kind === "delivery") turn = { kind: "turn", prompts: as.prompts }
+               if (as.kind === "delivery")
+                  turn = {
+                     kind: "turn",
+                     prompts: as.delivered.prompts,
+                     ...(as.delivered.asked ? { asked: true } : {}),
+                  }
             } else if (as.kind === "message") {
                const user = isRecord(as.message) && as.message.role === "user"
                if (user) inBx = false
-               if (!inBx) segment.push(as.message)
+               if (!inBx && wanted.has(entry.id)) segment.push(as.message)
             }
          }
          flush()

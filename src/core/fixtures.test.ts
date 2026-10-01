@@ -27,7 +27,9 @@ function ccTrailAfter(jsonl: string, promptId: string, options: CcViewOptions = 
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line))
       .find((entry) => entry.promptId === promptId)
-   return ccView(jsonl, options).trail(prompt?.uuid, undefined)
+   const view = ccView(jsonl, options)
+   const ids = view.live.map((e) => e.id)
+   return view.trail(ids.slice(ids.indexOf(prompt?.uuid) + 1))
 }
 
 /** Files the peer touched are gone, so every read stores the peer's view. */

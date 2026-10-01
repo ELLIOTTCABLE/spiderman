@@ -67,17 +67,29 @@ const entry = (message: unknown) => ({ type: "message", id: `e${++ids}`, message
 const user = (text: string) => entry({ role: "user", content: [{ type: "text", text }] })
 const said = (text: string) => entry(assistant([{ type: "text", text }]))
 
-function view(branch: readonly { id: string }[], deliveries: Record<string, string[]>) {
-   const byHash = new Map(Object.entries(deliveries).map(([t, p]) => [sha256Hex(t), p]))
+function view(
+   branch: readonly { id: string }[],
+   deliveries: Record<string, string[]>,
+   never: readonly string[] = [],
+   asked = false,
+) {
+   const byHash = new Map(
+      Object.entries(deliveries).map(([t, prompts]) => [
+         sha256Hex(t),
+         { prompts, asked },
+      ]),
+   )
    return piView(branch, {
       parent: (id) => {
          const at = branch.findIndex((e) => e.id === id)
          return at === -1 ? undefined : (branch[at - 1]?.id ?? null)
       },
-      hash: sha256Hex,
+      carrier: sha256Hex,
       delivered: (hash) => byHash.get(hash),
+      never: new Set(never),
    })
 }
+const all = (v: ReturnType<typeof view>) => v.trail(v.live.map((e) => e.id)).items
 
 test("our deliveries start answers to shared messages; the human's own messages are prompts", () => {
    const ours = user("[peer answer] …\n\n[the human's message]\nU1")
@@ -92,7 +104,7 @@ test("our deliveries start answers to shared messages; the human's own messages 
          [false, true, 0],
       ],
    )
-   assert.deepEqual(v.trail(undefined, undefined).items, [
+   assert.deepEqual(all(v), [
       { kind: "turn", prompts: ["U1"] },
       { kind: "text", text: "B1." },
       { kind: "prompt", text: "and why?", direct: true },
@@ -108,7 +120,7 @@ test("an elision exchange left on the branch never reaches a trail", () => {
       user("next"),
       said("B2."),
    ]
-   assert.deepEqual(view(branch, {}).trail(undefined, undefined).items, [
+   assert.deepEqual(all(view(branch, {})), [
       { kind: "text", text: "B1." },
       { kind: "prompt", text: "next", direct: true },
       { kind: "text", text: "B2." },
@@ -118,10 +130,35 @@ test("an elision exchange left on the branch never reaches a trail", () => {
 test("a delivery's answer still running shows nothing for it, not an empty heading", () => {
    const ours = user("U2 package")
    const branch = [said("B1."), ours]
-   assert.deepEqual(
-      view(branch, { "U2 package": ["U2"] }).trail(undefined, undefined).items,
-      [{ kind: "text", text: "B1." }],
-   )
+   assert.deepEqual(all(view(branch, { "U2 package": ["U2"] })), [
+      { kind: "text", text: "B1." },
+   ])
+})
+
+test("recorded elision entries never reach a trail, even where the marker can't tell", () => {
+   const reply = said("2,5")
+   const branch = [said("B1."), reply]
+   assert.deepEqual(all(view(branch, {}, [reply.id])), [{ kind: "text", text: "B1." }])
+})
+
+test("an answer whose question the receiver lost brings its question along", () => {
+   const ours = user("package + U1")
+   const v = view([ours, said("B1.")], { "package + U1": ["U1"] }, [], true)
+   assert.deepEqual(all(v), [
+      { kind: "turn", prompts: ["U1"], asked: true },
+      { kind: "text", text: "B1." },
+   ])
+})
+
+test("only the asked-for entries are read, each still under its delivery's heading", () => {
+   const first = user("p1")
+   const second = user("p2")
+   const b2 = said("B2.")
+   const v = view([first, said("B1."), second, b2], { p1: ["U1"], p2: ["U2"] })
+   assert.deepEqual(v.trail([b2.id]).items, [
+      { kind: "turn", prompts: ["U2"] },
+      { kind: "text", text: "B2." },
+   ])
 })
 
 test("thinking never reaches the trail", () => {

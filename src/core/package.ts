@@ -103,6 +103,11 @@ export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
          // one answer needs no heading; several, each under the message it answers
          if (turns > 1)
             segments.push({ kind: "frame", text: turnLine(item, ++turn, turns) })
+         if (item.asked)
+            segments.push({
+               kind: "prompt",
+               text: `[the human's prompt to the peer]\n${item.prompts.join("\n\n")}`,
+            })
       } else if (item.kind === "text") {
          for (const block of splitBlocks(item.text))
             segments.push({ kind: "prose", text: block.raw })

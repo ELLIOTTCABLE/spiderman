@@ -13,8 +13,8 @@ export interface CcViewOptions {
    readonly exists?: (path: string) => boolean
    /** the live branch runs back from here, e.g. a prompt CC just wrote; default: the newest entry */
    readonly leaf?: string
-   /** to recognise the attachments holding texts we delivered */
-   readonly hash?: (text: string) => string
+   /** a delivered text's carrier hash, to recognise the attachments holding ours */
+   readonly carrier?: (text: string) => string
 }
 
 type Entry = Record<string, unknown>
@@ -69,7 +69,7 @@ export function ccView(jsonl: string, options: CcViewOptions = {}): SideView {
          startsTurn: first?.kind === "prompt",
          ...(first?.kind === "prompt" ? { prompt: first.text } : {}),
          ...(texts.length > 0 ? { text: texts.join("\n") } : {}),
-         carries: carried(entry, options.hash),
+         carries: carried(entry, options.carrier),
       }
    })
 
@@ -82,15 +82,11 @@ export function ccView(jsonl: string, options: CcViewOptions = {}): SideView {
             entries[i]?.entry.parentUuid ?? entries[i]?.entry.logicalParentUuid
          return typeof parent === "string" ? parent : null
       },
-      trail(after, through) {
-         const from = after === undefined ? -1 : live.findIndex((e) => e.id === after)
-         const to =
-            through === undefined
-               ? live.length - 1
-               : live.findIndex((e) => e.id === through)
+      trail(ids) {
+         const wanted = new Set(ids)
          const items: TrailItem[] = []
          const issues: string[] = []
-         const span = indices.slice(from + 1, to + 1)
+         const span = indices.filter((i) => wanted.has(String(entries[i]?.entry.uuid)))
          for (const i of span) {
             const found = itemsAt(i)
             if (found === undefined)
@@ -108,11 +104,14 @@ export function ccView(jsonl: string, options: CcViewOptions = {}): SideView {
    }
 }
 
-function carried(entry: Entry, hash: ((text: string) => string) | undefined): string[] {
+function carried(
+   entry: Entry,
+   carrier: ((text: string) => string) | undefined,
+): string[] {
    const attachment = isRecord(entry.attachment) ? entry.attachment : {}
-   if (hash === undefined || attachment.type !== "hook_additional_context") return []
+   if (carrier === undefined || attachment.type !== "hook_additional_context") return []
    const content = Array.isArray(attachment.content) ? attachment.content : []
-   return content.flatMap((c) => (typeof c === "string" ? [hash(c)] : []))
+   return content.flatMap((c) => (typeof c === "string" ? [carrier(c)] : []))
 }
 
 function parseLines(jsonl: string, issues: { line: number; issue: string }[]): Line[] {
