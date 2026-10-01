@@ -117,7 +117,7 @@ test("a full turn: standing context, B in parallel, elided display, then deliver
    const h = harness({
       mediate: async (a, b) => {
          asked.push([a, b])
-         return '{"elide": ["B says X"]}'
+         return "1"
       },
    })
    assert.deepEqual(

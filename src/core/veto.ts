@@ -4,8 +4,8 @@ import type { Block } from "./blocks.ts"
 const NUMBER = /\d+(?:[.,]\d+)*(?:%|ms|[kmbgt]b?|[kmbgt]i?b)?/gi
 
 /**
- * Specifics a mediator must not collapse away: B's numbers and code that A's answer lacks. A
- * block holding any of them is kept, whatever the anchors said. Keep-only: it never elides.
+ * Specifics an elider must not collapse away: B's numbers and code that A's answer lacks. A
+ * block holding any of them is kept, whatever the elider picked. Keep-only: it never elides.
  */
 export function vetoElisions(
    blocks: readonly Block[],

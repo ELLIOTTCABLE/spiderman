@@ -1,5 +1,5 @@
+import { ELISION_TIMEOUT_MS } from "./elision.ts"
 import { isHumanPrompt } from "./human.ts"
-import { MEDIATOR_TIMEOUT_MS } from "./mediator.ts"
 
 /**
  * The turn state machine (ledger: "Turn state machine"), as a pure reducer. The pi extension
@@ -28,7 +28,7 @@ export const defaultTurnConfig: TurnConfig = {
    dedupeWindowMs: 60_000,
    retryMs: 2_000,
    submitReserveMs: 1_500,
-   stopReserveMs: MEDIATOR_TIMEOUT_MS + 5_000,
+   stopReserveMs: ELISION_TIMEOUT_MS + 5_000,
 }
 
 export interface Part {

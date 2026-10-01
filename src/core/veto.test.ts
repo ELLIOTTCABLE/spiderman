@@ -44,7 +44,7 @@ test("code A lacks keeps the block: inline spans and fenced lines", () => {
    assert.deepEqual(veto("Use `fetchUser`.", a, [0]), { elided: [0], vetoed: [] })
 })
 
-test("the veto only keeps: blocks the anchors kept are never touched", () => {
+test("the veto only keeps: blocks the elider kept are never touched", () => {
    assert.deepEqual(veto("Plain words.\n\nMore 42 words.", "", []), {
       elided: [],
       vetoed: [],

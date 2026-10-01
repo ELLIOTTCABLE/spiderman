@@ -51,3 +51,14 @@ function wholeAnswer(source: string): Block[] {
    const raw = source.replace(/\n+$/, "")
    return raw.trim() === "" ? [] : [{ kind: "other", raw }]
 }
+
+/** A block's opening words, as a one-line reference to it; a code block's fence is skipped. */
+export function leadWords(block: Block, count: number): string {
+   const source =
+      block.kind === "code" ? block.raw.split("\n").slice(1).join("\n") : block.raw
+   const words = source
+      .split(/\s+/)
+      .filter((w) => w !== "" && !/^(?:`{3,}|~{3,})$/.test(w))
+   const head = words.slice(0, count).join(" ")
+   return words.length > count ? `${head}…` : head
+}

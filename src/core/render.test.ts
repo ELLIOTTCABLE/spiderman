@@ -9,16 +9,16 @@ const answer = [
    "Delta four.",
    "Epsilon five.",
 ].join("\n\n")
-const render = (md: string, anchors: string[], aText?: string) =>
-   renderElided(md, { kind: "ok", anchors }, aText).text
+const render = (md: string, indices: number[], aText?: string) =>
+   renderElided(md, { kind: "ok", indices }, aText).text
 
-test("no anchors renders the answer verbatim with no header", () => {
+test("no indices renders the answer verbatim with no header", () => {
    assert.equal(render(answer, []), answer)
 })
 
 test("each elided block becomes a one-line preview of its own first words", () => {
    assert.equal(
-      render(answer, ["Beta two", "Gamma three", "Epsilon"]),
+      render(answer, [2, 3, 5]),
       'Alpha one.\n\n[elided: "Beta two."]\n[elided: "Gamma three."]\n\nDelta four.\n\n[elided: "Epsilon five."]',
    )
 })
@@ -26,7 +26,7 @@ test("each elided block becomes a one-line preview of its own first words", () =
 test("a long block's preview quotes its first eight words and marks the cut", () => {
    const md = "Keep.\n\nOne two three four five six seven eight nine ten."
    assert.equal(
-      render(md, ["One two three"]),
+      render(md, [2]),
       'Keep.\n\n[elided: "One two three four five six seven eight…"]',
    )
 })
@@ -34,42 +34,48 @@ test("a long block's preview quotes its first eight words and marks the cut", ()
 test("a code block's preview skips the fence", () => {
    const md = "Intro.\n\n```ts\nconst a = 1\n\nconst b = 2\n```\n\nOutro."
    assert.equal(
-      render(md, ["const a"]),
+      render(md, [2]),
       'Intro.\n\n[elided: "const a = 1 const b = 2"]\n\nOutro.',
    )
 })
 
-test("unparseable anchors show the answer in full under a header", () => {
-   const rendered = renderElided(answer, { kind: "unparseable", reason: "no JSON" }).text
-   assert.equal(rendered, `[elision unavailable (no JSON); shown in full]\n\n${answer}`)
+test("indices count our blocks, so a fence with blank lines is one paragraph", () => {
+   const md = "Intro.\n\n```\nx\n\ny\n```\n\n- a\n\n- b\n\nOutro."
+   assert.equal(
+      render(md, [4]),
+      'Intro.\n\n```\nx\n\ny\n```\n\n- a\n\n- b\n\n[elided: "Outro."]',
+   )
 })
 
-test("anchors that match nothing are counted in a header and keep their paragraphs", () => {
-   assert.equal(
-      render(answer, ["Alpha one", "Zeta six", ""]),
-      "[elision: 2 of 3 anchors matched no single paragraph; kept]\n\n" +
+test("unparseable output shows the answer in full under a header", () => {
+   const rendered = renderElided(answer, { kind: "unparseable", reason: "no list" }).text
+   assert.equal(rendered, `[elision unavailable (no list); shown in full]\n\n${answer}`)
+})
+
+test("out-of-range and repeated indices elide nothing more; out-of-range ones are named", () => {
+   assert.deepEqual(renderElided(answer, { kind: "ok", indices: [0, 1, 1, 9] }), {
+      text:
+         "[elision: ignored paragraph numbers out of range: 0, 9]\n\n" +
          '[elided: "Alpha one."]\n\nBeta two.\n\nGamma three.\n\nDelta four.\n\nEpsilon five.',
-   )
+      elided: [1],
+      vetoed: [],
+   })
 })
 
 test("kept blocks are byte-identical to the source", () => {
    const md = "Keep *this*  exactly.\n\n- list\n- items\n\nDrop this one."
    assert.equal(
-      render(md, ["Drop this"]),
+      render(md, [3]),
       'Keep *this*  exactly.\n\n- list\n- items\n\n[elided: "Drop this one."]',
    )
 })
 
-test("given A's text, blocks with numbers A lacks stay, and the veto is counted", () => {
+test("given A's text, blocks with numbers A lacks stay, and the veto is reported", () => {
    const md = "Same point as A.\n\nIt saved 30% at 100M rows."
-   const result = renderElided(
-      md,
-      { kind: "ok", anchors: ["Same point", "It saved"] },
-      "Same point.",
-   )
-   assert.deepEqual(result, {
+   assert.deepEqual(renderElided(md, { kind: "ok", indices: [1, 2] }, "Same point."), {
       text: '[elided: "Same point as A."]\n\nIt saved 30% at 100M rows.',
-      vetoed: 1,
+      elided: [1],
+      vetoed: [2],
    })
 })
 

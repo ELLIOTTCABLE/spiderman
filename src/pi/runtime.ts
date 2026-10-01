@@ -1,5 +1,4 @@
 import { isAbsolute, join } from "node:path"
-import { type AnchorParse, parseAnchors } from "../core/anchors.ts"
 import {
    type BLedger,
    bAnswerText,
@@ -16,6 +15,7 @@ import {
 } from "../core/bridge.ts"
 import { type Cursor, ccTrail } from "../core/cc-trail.ts"
 import { CHUNK_CHARS, chunkPackage } from "../core/chunk.ts"
+import { type IndexParse, parseIndices } from "../core/elision.ts"
 import {
    formatPeerPackage,
    type PackageEnv,
@@ -328,24 +328,26 @@ export class Runtime {
          `turns/${this.#deps.sessionId}/b-${turn}.md`,
          bText,
       )
-      let parse: AnchorParse = { kind: "ok", anchors: [] }
+      let parse: IndexParse = { kind: "ok", indices: [] }
       const started = this.#deps.now()
       if (this.#deps.mediate !== undefined && bText.trim() !== "") {
          try {
-            parse = parseAnchors(await this.#deps.mediate(aText, bText))
+            parse = parseIndices(await this.#deps.mediate(aText, bText))
          } catch (error) {
             parse = { kind: "unparseable", reason: `mediator failed: ${String(error)}` }
          }
       }
-      const { text: rendered, vetoed } = renderElided(bText, parse, aText)
+      const shown = renderElided(bText, parse, aText)
+      const rendered = shown.text
       this.#deps.log({
          what: "display",
          turn,
          bChars: bText.length,
          shownChars: rendered.length,
-         vetoed,
-         anchors: parse.kind === "ok" ? parse.anchors : parse.reason,
-         mediatorMs: this.#deps.now() - started,
+         indices: parse.kind === "ok" ? parse.indices : parse.reason,
+         elided: shown.elided,
+         vetoed: shown.vetoed,
+         elisionMs: this.#deps.now() - started,
          at: this.#deps.now(),
       })
       const outcome = data?.outcome
