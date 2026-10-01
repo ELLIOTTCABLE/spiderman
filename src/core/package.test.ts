@@ -561,13 +561,15 @@ test("reading back what was just written adds nothing", () => {
    assert.deepEqual(body(t, env), ["[tool] wrote n.md (2 lines)"])
 })
 
-test("paths under the shared cwd are shown relative to it; others stay absolute", () => {
+test("paths under the shared cwd are shown relative to it, with `/`; others stay absolute", () => {
    const { env } = fakeEnv({ "C:\\proj\\specs\\a.md": "one\ntwo" })
    const t = trail(
       call("r", "Read", { file_path: "C:\\proj\\specs\\a.md" }),
       ok("r", numbered(1, ["one", "two"])),
       call("g", "Grep", { pattern: "x", path: "c:/PROJ" }),
       ok("g", ""),
+      call("n", "Grep", { pattern: "y", path: "notes\\drafts" }),
+      ok("n", ""),
       call("b", "Bash", { command: "seq 9999" }),
       {
          kind: "result",
@@ -579,8 +581,9 @@ test("paths under the shared cwd are shown relative to it; others stay absolute"
    )
    const pkg = formatPeerPackage(t, { ...env, cwd: "C:\\proj\\" })
    assert.deepEqual(packageText(pkg).split("\n\n").slice(1, -1), [
-      "[tool] read specs\\a.md L1–2",
+      "[tool] read specs/a.md L1–2",
       '[tool] Grep {"pattern":"x","path":"."} → no output',
+      '[tool] Grep {"pattern":"y","path":"notes/drafts"} → no output',
       '[tool] Bash {"command":"seq 9999"} → saved at C:\\Users\\u\\.claude\\tool-results\\b.txt',
    ])
    assert.deepEqual(pkg.interactions[0]?.pointers, ["C:\\proj\\specs\\a.md"])

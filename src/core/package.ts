@@ -468,14 +468,15 @@ function renderMessage(
 
 const PATH_KEYS: ReadonlySet<string> = new Set(["path", "file_path"])
 
-// drive-letter paths compare case-insensitively, as Windows does
+// drive letters fold case, as Windows does; both peers' read tools take `/` on Windows
 function relativeToCwd(env: PackageEnv, path: string): string {
    if (env.cwd === undefined) return path
    const base = env.cwd.replaceAll("\\", "/").replace(/\/+$/, "")
    const fold = (p: string) => (/^[a-z]:/i.test(p) ? p.toLowerCase() : p)
-   const candidate = fold(path.replaceAll("\\", "/"))
-   if (candidate === fold(base)) return "."
-   return candidate.startsWith(`${fold(base)}/`) ? path.slice(base.length + 1) : path
+   const slashed = path.replaceAll("\\", "/")
+   if (fold(slashed) === fold(base)) return "."
+   if (fold(slashed).startsWith(`${fold(base)}/`)) return slashed.slice(base.length + 1)
+   return /^([a-z]:|\/)/i.test(slashed) ? path : slashed
 }
 
 function tool(text: string, pointers: readonly string[]): Rendered {
