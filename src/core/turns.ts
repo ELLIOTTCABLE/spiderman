@@ -82,6 +82,8 @@ export type TurnEvent =
    | { readonly type: "asideSettled" }
    /** starting B's turn failed (e.g. compaction in flight, model guard); its prompts go back */
    | { readonly type: "bFailed"; readonly turn: number; readonly reason: string }
+   /** the prompt never reached A (another hook blocked it): B must not answer it either */
+   | { readonly type: "bDropped"; readonly turn: number }
    | { readonly type: "tick" }
 
 export type BOutcome = "completed" | "error" | "aborted"
@@ -252,6 +254,15 @@ class Machine {
             return
          case "bFailed":
             return this.#bFailed(event.turn, event.reason)
+         case "bDropped":
+            this.#log("bDropped", { turn: event.turn })
+            if (this.state.bRunning !== event.turn) return
+            this.state = {
+               ...this.state,
+               bRunning: undefined,
+               bTurns: this.state.bTurns.filter((t) => t.turn !== event.turn),
+            }
+            return
          case "tick":
             return
       }

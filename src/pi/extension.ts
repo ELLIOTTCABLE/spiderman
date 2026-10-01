@@ -6,15 +6,18 @@ import {
    readFileSync,
    renameSync,
    rmSync,
+   statSync,
    writeFileSync,
 } from "node:fs"
 import { dirname } from "node:path"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import { carrierHash, ledgerFromLines } from "../core/coherence.ts"
 import {
    ELISION_TIMEOUT_MS,
    MEDIATOR_SYSTEM_PROMPT,
    mediatorInput,
 } from "../core/elision.ts"
+import { piView } from "../core/pi-trail.ts"
 import { STATE_DIR } from "../core/protocol.ts"
 import { STANDING_FOR_B } from "../core/standing.ts"
 import { sha256Hex } from "../core/store.ts"
@@ -62,6 +65,7 @@ const isStrategy = (value: string): value is Strategy =>
    (STRATEGIES as readonly string[]).includes(value)
 const REWIND_COMMAND = "spiderman-rewind"
 const REWIND_ENTRY = "spiderman-rewind"
+const TREE_ENTRY = "spiderman-tree"
 
 interface Session {
    readonly server: HookServer
@@ -69,6 +73,10 @@ interface Session {
    readonly stateDir: string
    ctx: ExtensionContext
 }
+
+// room an elision turn needs before pi's auto-compaction would start
+const BX_MARGIN_TOKENS = 8_192
+const DEFAULT_RESERVE_TOKENS = 16_384
 
 const nodeFs: RuntimeFs & PeerFileFs = {
    mkdirSync: (path, options) => mkdirSync(path, options),
@@ -89,6 +97,41 @@ const nodeFs: RuntimeFs & PeerFileFs = {
    },
    appendFileSync: (path, data) => appendFileSync(path, data),
    exists: (path) => existsSync(path),
+   size(path) {
+      try {
+         return statSync(path).size
+      } catch {
+         return undefined
+      }
+   },
+   readFrom(path, offset) {
+      try {
+         return readFileSync(path).subarray(offset).toString("utf8")
+      } catch {
+         return undefined
+      }
+   },
+}
+
+/** The sidecar's ledger lines and recorded elision entries, for a resumed session. */
+function restore(logPath: string) {
+   const lines = (nodeFs.readText(logPath) ?? "").split("\n").flatMap((line) => {
+      try {
+         return [JSON.parse(line) as unknown]
+      } catch {
+         return []
+      }
+   })
+   const never = lines.flatMap((l) =>
+      typeof l === "object" &&
+      l !== null &&
+      "what" in l &&
+      l.what === "never" &&
+      "ids" in l
+         ? (l.ids as unknown[]).filter((id): id is string => typeof id === "string")
+         : [],
+   )
+   return { ledger: ledgerFromLines(lines), never }
 }
 
 export default function spiderman(pi: ExtensionAPI): void {
@@ -119,6 +162,8 @@ export default function spiderman(pi: ExtensionAPI): void {
       | undefined
    /** what the /tree guard lets through: our own rewind */
    let treeTarget: string | undefined
+   /** typed in B's pane during an elision turn, which the rewind would discard */
+   const held: string[] = []
 
    pi.registerCommand(REWIND_COMMAND, {
       description: "spiderman's own: rewinds B over its elision turn",
@@ -229,6 +274,32 @@ export default function spiderman(pi: ExtensionAPI): void {
             })
          },
          abort: () => live().abort(),
+         bxRoom() {
+            const usage = live().getContextUsage()
+            if (usage === undefined || usage.tokens === null) return true
+            const settings = pi.getSettings() as {
+               compaction?: { reserveTokens?: number }
+            }
+            const reserve = settings.compaction?.reserveTokens ?? DEFAULT_RESERVE_TOKENS
+            return usage.tokens + BX_MARGIN_TOKENS < usage.contextWindow - reserve
+         },
+         idsSince(leaf) {
+            const branch = live().sessionManager.getBranch()
+            const at = leaf === undefined ? -1 : branch.findIndex((e) => e.id === leaf)
+            return branch.slice(at + 1).map((e) => e.id)
+         },
+         view({ delivered, never }) {
+            const manager = live().sessionManager
+            return piView(manager.getBranch(), {
+               parent: (id) => {
+                  const entry = manager.getEntry(id)
+                  return entry === undefined ? undefined : entry.parentId
+               },
+               carrier: (text) => carrierHash(sha256Hex, text),
+               delivered,
+               never,
+            })
+         },
          messagesSince(leaf) {
             const branch = live().sessionManager.getBranch()
             const at = leaf === undefined ? -1 : branch.findIndex((e) => e.id === leaf)
@@ -267,6 +338,17 @@ export default function spiderman(pi: ExtensionAPI): void {
                ? { strategy, mediate: mediator(live, flag("mediator"), providers, log) }
                : { strategy },
          log,
+         restored: restore(logPath),
+         bxDone() {
+            // what the human typed during the elision turn goes in now, as their own turn
+            for (const text of held.splice(0)) {
+               live().ui.notify(
+                  "spiderman: sending what you typed during the elision turn.",
+                  "info",
+               )
+               pi.sendUserMessage(text)
+            }
+         },
          config: {
             ...defaultTurnConfig,
             soloPrefix: flag("solo"),
@@ -274,6 +356,8 @@ export default function spiderman(pi: ExtensionAPI): void {
             stopWaitMs: seconds("stopWait"),
             chunkDelayMs: 250,
             startTimeoutMs: 15_000,
+            entryWaitMs: 60_000,
+            pollMs: 50,
             bx: strategy === "bx",
          },
       })
@@ -301,19 +385,25 @@ export default function spiderman(pi: ExtensionAPI): void {
       await stop()
    })
    // byte-identical every turn, so it stays in B's cached prefix
-   pi.on("before_agent_start", (event) =>
-      event.systemPrompt.endsWith(STANDING_FOR_B)
+   pi.on("before_agent_start", (event) => {
+      session?.runtime.bRunStarting(event.prompt)
+      return event.systemPrompt.endsWith(STANDING_FOR_B)
          ? undefined
-         : { systemPrompt: event.systemPrompt + STANDING_FOR_B },
-   )
-   // /tree moves B's leaf under the protocol and skips the input swallow; /fork re-pairs fine
+         : { systemPrompt: event.systemPrompt + STANDING_FOR_B }
+   })
    pi.on("session_before_tree", (event, ctx) => {
       if (treeTarget !== undefined && event.preparation.targetId === treeTarget) return
+      if (!session?.runtime.bxInFlight()) return
       ctx.ui.notify(
-         "spiderman: type in Claude Code. /tree here would desync the peer.",
+         "spiderman: B is eliding its last answer; try /tree again in a moment.",
          "warning",
       )
       return { cancel: true }
+   })
+   // pi keeps the leaf in memory only: an entry on the new branch makes a restart resume there
+   pi.on("session_tree", (event) => {
+      if (treeTarget !== undefined) return
+      pi.appendEntry(TREE_ENTRY, { from: event.oldLeafId, to: event.newLeafId })
    })
    pi.on("agent_start", (_event, ctx) => {
       if (session !== undefined) session.ctx = ctx
@@ -323,12 +413,13 @@ export default function spiderman(pi: ExtensionAPI): void {
       if (session !== undefined) session.ctx = ctx
       session?.runtime.bSettled()
    })
-   // typing here would desync the protocol; the human's prompts belong in Claude Code
    pi.on("input", (event, ctx) => {
-      if (event.source !== "interactive") return { action: "continue" }
+      if (event.source !== "interactive" || !session?.runtime.bxInFlight())
+         return { action: "continue" }
+      held.push(event.text)
       ctx.ui.notify(
-         "spiderman: type in Claude Code. This pane shows the peer's side.",
-         "warning",
+         "spiderman: B is eliding its last answer; your message follows it.",
+         "info",
       )
       return { action: "handled" }
    })

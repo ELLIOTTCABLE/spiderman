@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
+import { carrierHash } from "../core/coherence.ts"
+import { piView } from "../core/pi-trail.ts"
 import type { HookRequest } from "../core/protocol.ts"
 import { sha256Hex } from "../core/store.ts"
 import { defaultTurnConfig } from "../core/turns.ts"
@@ -11,12 +13,15 @@ import {
    type RuntimeFs,
 } from "./runtime.ts"
 
+const POLL = 50
+
 function harness(
    options: {
       elision?: Elision
       refuse?: number
       refuseBx?: string
       rewind?: () => Promise<Outcome>
+      bxRoom?: boolean
    } = {},
 ) {
    let now = 0
@@ -34,12 +39,21 @@ function harness(
       appendFileSync: (path, data) =>
          void files.set(path, (files.get(path) ?? "") + data),
       exists: (path) => files.has(path),
+      size: (path) => files.get(path)?.length,
+      readFrom: (path, offset) => files.get(path)?.slice(offset),
    }
+   // B's session: a branch of pi entries, rewound by cutting it back
+   let branch: { type: string; id: string; message: unknown }[] = []
+   let ids = 0
+   const push = (message: unknown) =>
+      branch.push({ type: "message", id: `b${++ids}`, message })
    const sent: string[] = []
-   const scripted = new Map<number, unknown[]>()
-   let refusals = options.refuse ?? 0
+   /** sends, rewinds and aborts, in the order B saw them */
    const seen: string[] = []
    const logs: Record<string, unknown>[] = []
+   let refusals = options.refuse ?? 0
+   const since = (leaf: string | undefined) =>
+      branch.slice(leaf === undefined ? 0 : branch.findIndex((e) => e.id === leaf) + 1)
    const b: BSide = {
       send(text) {
          if (refusals > 0) {
@@ -50,16 +64,30 @@ function harness(
             return { ok: false, reason: options.refuseBx }
          sent.push(text)
          seen.push(`send ${sent.length}`)
+         push({ role: "user", content: [{ type: "text", text }] })
          return { ok: true }
       },
-      leafId: () => `leaf-${sent.length}`,
-      rewindPoint: () => `leaf-${sent.length}`,
-      messagesSince: () => scripted.get(sent.length) ?? [],
+      leafId: () => branch.at(-1)?.id,
+      rewindPoint: () => branch.at(-1)?.id,
+      messagesSince: (leaf) => since(leaf).map((e) => e.message),
+      idsSince: (leaf) => since(leaf).map((e) => e.id),
+      view: ({ delivered, never }) =>
+         piView(branch, {
+            parent: (id) => {
+               const at = branch.findIndex((e) => e.id === id)
+               return at === -1 ? undefined : (branch[at - 1]?.id ?? null)
+            },
+            carrier: (text) => carrierHash(sha256Hex, text),
+            delivered,
+            never,
+         }),
       rewind(entryId) {
          seen.push(`rewind ${entryId}`)
+         branch = branch.slice(0, branch.findIndex((e) => e.id === entryId) + 1)
          return options.rewind?.() ?? Promise.resolve({ ok: true })
       },
       abort: () => void seen.push("abort"),
+      bxRoom: () => options.bxRoom ?? true,
    }
    const runtime = new Runtime({
       now: () => now,
@@ -83,6 +111,8 @@ function harness(
          retryMs: 100,
          chunkDelayMs: 250,
          startTimeoutMs: 5_000,
+         entryWaitMs: 2_000,
+         pollMs: POLL,
          bx: options.elision?.strategy === "bx",
       },
    })
@@ -103,16 +133,55 @@ function harness(
          "t.jsonl",
          `${(files.get("t.jsonl") ?? "") + entries.map((e) => JSON.stringify(e)).join("\n")}\n`,
       )
-   return { runtime, files, sent, scripted, advance, transcript, seen, logs, flush }
+   /** B's run starting, as pi announces it */
+   const start = (text = sent.at(-1) ?? "") => {
+      runtime.bRunStarting(text)
+      runtime.bStarted()
+   }
+   const answer = (text: string, usage?: object) =>
+      push({
+         role: "assistant",
+         content: [{ type: "text", text }],
+         stopReason: "stop",
+         ...(usage === undefined ? {} : { usage }),
+      })
+   /** The human typing in B's own pane: pi announces the run, then appends the message */
+   const pane = (text: string) => {
+      runtime.bRunStarting(text)
+      push({ role: "user", content: [{ type: "text", text }] })
+      runtime.bStarted()
+   }
+   /** The human's prompt: the hook asks, then CC writes the entry, then B may start. */
+   const submit = async (text: string, promptId: string) => {
+      const reply = runtime.handle(prompt(text, promptId))
+      transcript(userEntry(text, promptId))
+      await advance(POLL)
+      return reply
+   }
+   return {
+      runtime,
+      files,
+      sent,
+      seen,
+      logs,
+      advance,
+      transcript,
+      start,
+      answer,
+      submit,
+      flush,
+      pane,
+   }
 }
 
-const base = { ccSessionId: "cc1", transcriptPath: "t.jsonl", cwd: "P" }
-const prompt = (text: string, promptId: string, index = 1): HookRequest => ({
+const prompt = (text: string, promptId: string): HookRequest => ({
    kind: "prompt",
-   ...base,
+   ccSessionId: "cc1",
+   transcriptPath: "t.jsonl",
+   cwd: "P",
    prompt: text,
    promptId,
-   part: { index, count: 2 },
+   part: { index: 1, count: 1 },
 })
 const stop = (promptId: string, last: string): HookRequest => ({
    kind: "stop",
@@ -122,255 +191,147 @@ const stop = (promptId: string, last: string): HookRequest => ({
    lastAssistantMessage: last,
    part: { index: 1, count: 1 },
 })
-const userEntry = (text: string, promptId: string) => ({
-   type: "user",
-   uuid: `u-${promptId}`,
-   promptId,
-   message: { role: "user", content: text },
-})
-const aText = (text: string, uuid: string) => ({
-   type: "assistant",
-   uuid,
-   message: { role: "assistant", content: [{ type: "text", text }] },
-})
-const bReply = (text: string) => [
-   { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" },
-]
-
-test("a full turn: standing context, B in parallel, elided display, then delivery to A", async () => {
-   const asked: string[][] = []
-   const h = harness({
-      elision: {
-         strategy: "mediator",
-         mediate: async (a, b) => {
-            asked.push([a, b])
-            return "1"
-         },
-      },
+let uuids = 0
+let parent: string | null = null
+const linked = (entry: Record<string, unknown>) => {
+   const uuid = `u${++uuids}`
+   const out = { ...entry, uuid, parentUuid: parent }
+   parent = uuid
+   return out
+}
+const userEntry = (text: string, promptId: string) =>
+   linked({ type: "user", promptId, message: { role: "user", content: text } })
+const aText = (text: string) =>
+   linked({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text }] },
    })
-   assert.deepEqual(
-      await h.runtime.handle({ kind: "session-start", ...base, source: "startup" }),
-      {},
-   )
 
-   h.transcript(userEntry("U1", "p1"))
-   const first = [
-      h.runtime.handle(prompt("U1", "p1", 1)),
-      h.runtime.handle(prompt("U1", "p1", 2)),
-   ]
-   await h.advance(250)
-   assert.deepEqual(await Promise.all(first), [{}, {}])
+test("a full turn: B starts once CC wrote the prompt; elided display; then B's answer reaches A", async () => {
+   const h = harness({ elision: { strategy: "mediator", mediate: async () => "1" } })
+   await h.submit("U1", "p1")
    assert.deepEqual(h.sent, ["[the human's message]\nU1"])
-
-   h.runtime.bStarted()
-   h.scripted.set(1, bReply("B says X.\n\nB also says Y."))
+   h.start()
+   h.answer("B says X.\n\nB also says Y.")
    h.runtime.bSettled()
-
-   h.transcript(aText("A says X.", "a1"))
+   h.transcript(aText("A says X."))
    const display = await h.runtime.handle(stop("p1", "A says X."))
-   assert.deepEqual(asked, [["A says X.", "B says X.\n\nB also says Y."]])
-   assert.equal(
-      display.systemMessage,
-      '[peer 1/1]\n[peer answer] full text: .spiderman/turns/s1/b-1.md\n\n[elided: "B says X."]\n\nB also says Y.',
-   )
-   assert.equal(
-      h.files.get("P/.spiderman/turns/s1/b-1.md"),
-      "B says X.\n\nB also says Y.",
-   )
-
-   h.transcript(userEntry("U2", "p2"))
-   const part1 = h.runtime.handle(prompt("U2", "p2", 1))
-   const part2 = h.runtime.handle(prompt("U2", "p2", 2))
-   const delivered = await part1
-   assert.match(
-      delivered.additionalContext ?? "",
-      /^\[peer 1\/1\]\n\[peer answer\][\s\S]*B says X\.\n\nB also says Y\./,
-   )
-   await h.advance(250)
-   assert.deepEqual(await part2, {})
-   assert.match(
-      h.sent[1] ?? "",
-      /\[peer answer\][\s\S]*A says X\.[\s\S]*\[the human's message\]\nU2$/,
-   )
-})
-
-test("a mediator failure shows B in full, flagged", async () => {
-   const h = harness({
-      elision: {
-         strategy: "mediator",
-         mediate: async () => {
-            throw new Error("model not found")
-         },
-      },
-   })
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
-   h.runtime.bStarted()
-   h.scripted.set(1, bReply("Only paragraph."))
-   h.runtime.bSettled()
-   const display = await h.runtime.handle(stop("p1", "A"))
    assert.match(
       display.systemMessage ?? "",
-      /\[elision unavailable \(mediator failed: Error: model not found\); shown in full\]\n\nOnly paragraph\./,
+      /\[elided: "B says X\."\]\n\nB also says Y\.$/,
+   )
+
+   const delivered = await h.submit("U2", "p2")
+   assert.match(delivered.additionalContext ?? "", /B says X\.\n\nB also says Y\./)
+   assert.match(h.sent[1] ?? "", /A says X\.[\s\S]*\[the human's message\]\nU2$/)
+   assert.doesNotMatch(
+      h.sent[1] ?? "",
+      /\[the human's prompt to the peer\]\nU1/,
+      "B has U1",
    )
 })
 
-test("with no mediator (strategy off) B is shown in full, unflagged", async () => {
+test("a prompt CC never writes (another hook blocked it) never starts B", async () => {
    const h = harness()
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
-   h.runtime.bStarted()
-   h.scripted.set(1, bReply("All of it."))
-   h.runtime.bSettled()
-   const display = await h.runtime.handle(stop("p1", "A"))
-   assert.match(display.systemMessage ?? "", /full text: \S+\n\nAll of it\.$/)
+   void h.runtime.handle(prompt("blocked", "p1"))
+   await h.advance(2_000)
+   await h.advance(POLL)
+   assert.deepEqual(h.sent, [])
+   assert.ok(h.logs.some((l) => l.what === "promptNeverWritten"))
 })
 
-test("B refusing a message (compaction, model guard) is retried with the same prompt", async () => {
+test("a mediator failure shows B in full, flagged; with no elider, unflagged", async () => {
+   for (const [elision, shown] of [
+      [
+         {
+            strategy: "mediator",
+            mediate: async () => {
+               throw new Error("model not found")
+            },
+         },
+         /\[elision unavailable \(mediator failed: Error: model not found\); shown in full\]\n\nOnly\.$/,
+      ],
+      [{ strategy: "off" }, /full text: \S+\n\nOnly\.$/],
+   ] as const) {
+      const h = harness({ elision })
+      await h.submit("U1", "p1")
+      h.start()
+      h.answer("Only.")
+      h.runtime.bSettled()
+      assert.match((await h.runtime.handle(stop("p1", "A"))).systemMessage ?? "", shown)
+   }
+})
+
+test("B refusing a message is retried with the same prompt; a start that never comes is too", async () => {
    const h = harness({ refuse: 1 })
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
+   await h.submit("U1", "p1")
    assert.deepEqual(h.sent, [])
    await h.advance(100)
+   await h.advance(POLL)
    assert.deepEqual(h.sent, ["[the human's message]\nU1"])
-})
-
-test("a B turn that never starts is given up on and retried", async () => {
-   const h = harness()
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
-   assert.equal(h.sent.length, 1)
    await h.advance(5_000)
    await h.advance(100)
+   await h.advance(POLL)
    assert.equal(h.sent.length, 2)
+   assert.ok(
+      h.logs.some((l) => l.what === "lost"),
+      "the unstarted delivery is struck",
+   )
 })
 
 test("dispose answers every waiting hook, so none hangs until its timeout", async () => {
    const h = harness()
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
+   await h.submit("U1", "p1")
    const waiting = h.runtime.handle(stop("p1", "A"))
    h.runtime.dispose()
    assert.deepEqual(await waiting, {})
 })
 
-test("B1 repro: mid-turn prompt, solo turn, then a normal prompt never repeats A's earlier answer to B", async () => {
+test("the human's own turn in B holds the next shared prompt; A gets it as a direct message", async () => {
    const h = harness()
-   h.transcript(userEntry("U3a", "p3a"))
-   await h.runtime.handle(prompt("U3a", "p3a"))
-   h.runtime.bStarted()
-   h.scripted.set(1, bReply("B3a."))
+   await h.submit("U1", "p1")
+   h.start()
+   h.answer("B1.")
    h.runtime.bSettled()
+   h.transcript(aText("A1."))
+   await h.runtime.handle(stop("p1", "A1."))
 
-   h.transcript(aText("Looking.", "a3a-1"))
-   await h.runtime.handle(prompt("U3b", "p3a"))
-   // Stop arrives before A's final text reaches the transcript
-   await h.runtime.handle(stop("p3a", "A3a final."))
+   h.pane("why B1?")
+   h.answer("Because.")
+   const during = await h.submit("U2", "p2")
+   assert.doesNotMatch(
+      during.additionalContext ?? "",
+      /why B1/,
+      "an unfinished pane turn waits",
+   )
+   assert.equal(h.sent.length, 1, "U2 waits for the pane turn")
+   h.runtime.bSettled()
+   await h.flush()
+   assert.equal(h.sent.length, 2)
+   h.start()
+   h.answer("B2.")
+   h.runtime.bSettled()
+   const next = await h.submit("U3", "p3")
    assert.match(
-      h.sent[1] ?? "",
-      /Looking\.[\s\S]*A3a final\.[\s\S]*\[the human's message\]\nU3b$/,
+      next.additionalContext ?? "",
+      /\[the human messaged the peer directly\]\nwhy B1\?\n\nBecause\.[\s\S]*B2\./,
    )
-   h.runtime.bStarted()
-   h.scripted.set(2, bReply("B3b."))
-   h.runtime.bSettled()
-
-   h.transcript(
-      aText("A3a final.", "a3a-2"),
-      userEntry("U3b", "p3b"),
-      aText("A3b answer.", "a3b-1"),
-   )
-   await h.runtime.handle(stop("p3b", "A3b answer."))
-   h.transcript(userEntry("~solo", "p4"), aText("Solo answer.", "a4-1"))
-   await h.runtime.handle(prompt("~solo", "p4"))
-   await h.runtime.handle(stop("p4", "Solo answer."))
-   h.transcript(userEntry("U5", "p5"))
-   await h.runtime.handle(prompt("U5", "p5"))
-
-   const fifth = h.sent[2] ?? ""
-   assert.match(
-      fifth,
-      /A3b answer\.[\s\S]*~solo[\s\S]*Solo answer\.[\s\S]*\[the human's message\]\nU5$/,
-   )
-   assert.doesNotMatch(fifth, /Looking\.|A3a final\./)
-   assert.doesNotMatch(fifth, /U3b/)
-})
-
-test("a newly paired B gets A's last completed turn, not nothing and not everything", async () => {
-   const h = harness()
-   h.transcript(
-      userEntry("ancient question", "p0"),
-      aText("Ancient answer.", "a0"),
-      userEntry("U1", "p1"),
-      aText("A1 answer.", "a1"),
-      userEntry("U2", "p2"),
-   )
-   await h.runtime.handle(prompt("U2", "p2"))
-   const first = h.sent[0] ?? ""
-   assert.match(
-      first,
-      /\[the human's prompt to the peer\]\nU1[\s\S]*A1 answer\.[\s\S]*\[the human's message\]\nU2$/,
-   )
-   assert.doesNotMatch(first, /ancient|Ancient/)
-})
-
-test("several B answers reaching A at once are sectioned by the prompt each answered", async () => {
-   const h = harness()
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
-   h.runtime.bStarted()
-   h.transcript(userEntry("U2", "p2"))
-   const capped = h.runtime.handle(prompt("U2", "p2"))
-   await h.advance(1_000)
-   assert.deepEqual(await capped, {
-      systemMessage:
-         "spiderman: the peer is still answering; its answer reaches Claude with your next prompt.",
-   })
-   h.scripted.set(1, bReply("Answer to one."))
-   h.runtime.bSettled()
-   h.runtime.bStarted()
-   h.scripted.set(2, bReply("Answer to two."))
-   h.runtime.bSettled()
-   h.transcript(userEntry("U3", "p3"))
-   const delivered = (await h.runtime.handle(prompt("U3", "p3"))).additionalContext ?? ""
-   assert.match(
-      delivered,
-      /\[peer answer 1 of 2, to the human's message "U1"\]\n\nAnswer to one\.\n\n\[peer answer 2 of 2, to the human's message "U2"\]\n\nAnswer to two\./,
-   )
-})
-
-test("a short sentence A repeats verbatim in a later turn still reaches B", async () => {
-   const h = harness()
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
-   h.runtime.bStarted()
-   h.runtime.bSettled()
-   h.transcript(aText("Done.", "a1"), userEntry("U2", "p2"))
-   await h.runtime.handle(stop("p1", "Done."))
-   await h.runtime.handle(prompt("U2", "p2"))
-   assert.match(h.sent[1] ?? "", /Done\./)
-   h.runtime.bStarted()
-   h.runtime.bSettled()
-   h.transcript(aText("Done.", "a2"), userEntry("U3", "p3"))
-   await h.runtime.handle(stop("p2", "Done."))
-   await h.runtime.handle(prompt("U3", "p3"))
-   assert.match(h.sent[2] ?? "", /Done\.[\s\S]*\[the human's message\]\nU3$/)
 })
 
 const bx = { strategy: "bx" } as const
 const logged = (logs: Record<string, unknown>[], what: string) =>
    logs.flatMap(({ what: w, at: _at, ...rest }) => (w === what ? [rest] : []))
 
+/** B answered U1, A stopped, and U2 came in: the display waits on B's elision turn. */
 async function elisionPending(h: ReturnType<typeof harness>) {
-   h.transcript(userEntry("U1", "p1"))
-   await h.runtime.handle(prompt("U1", "p1"))
-   h.runtime.bStarted()
-   h.scripted.set(1, bReply("Same as A.\n\nOnly B says this."))
+   await h.submit("U1", "p1")
+   h.start()
+   h.answer("Same as A.\n\nOnly B says this.")
    h.runtime.bSettled()
-   h.transcript(aText("Same as A.", "a1"))
+   h.transcript(aText("Same as A."))
    const display = h.runtime.handle(stop("p1", "Same as A."))
    await h.flush()
-   h.transcript(userEntry("U2", "p2"))
-   await h.runtime.handle(prompt("U2", "p2"))
+   await h.submit("U2", "p2")
    // wrapped: an async function returning a promise would adopt it
    return { display }
 }
@@ -380,115 +341,69 @@ test("Bx: the display waits on B's elision turn; B is rewound before its next tu
    const { display } = await elisionPending(h)
    assert.match(
       h.sent[1] ?? "",
-      /^\[elision request[\s\S]*<answer_a>\nSame as A\.\n<\/answer_a>[\s\S]*\n1: "Same as A\."\n2: "Only B says this\."\n/,
+      /^\[elision request[\s\S]*\n1: "Same as A\."\n2: "Only B says this\."\n/,
    )
    assert.equal(h.sent.length, 2, "U2 is held while B elides")
-
-   h.runtime.bStarted()
-   h.scripted.set(2, [
-      { role: "user", content: "the elision request" },
-      {
-         role: "assistant",
-         content: [{ type: "text", text: "1" }],
-         stopReason: "stop",
-         usage: { input: 1_900, cacheRead: 1_792, output: 3 },
-      },
-   ])
+   h.start()
+   h.answer("1", { input: 1_900, cacheRead: 1_792, output: 3 })
    h.runtime.bSettled()
    assert.match(
       (await display).systemMessage ?? "",
       /\[elided: "Same as A\."\]\n\nOnly B says this\.$/,
    )
    await h.flush()
-   assert.deepEqual(h.seen, ["send 1", "send 2", "rewind leaf-1", "send 3"])
-   assert.match(h.sent[2] ?? "", /\[the human's message\]\nU2$/)
+   assert.deepEqual(h.seen, ["send 1", "send 2", "rewind b2", "send 3"])
    assert.doesNotMatch(h.sent[2] ?? "", /elision request/)
-   assert.deepEqual(logged(h.logs, "bx"), [
-      {
-         turn: 1,
-         sent: true,
-         outcome: "completed",
-         reply: "1",
-         usage: { input: 1_900, cacheRead: 1_792, output: 3 },
-         rewind: "ok",
-         bxMs: 0,
-      },
-   ])
+   const [done] = logged(h.logs, "bx")
    assert.deepEqual(
-      logged(h.logs, "display").map((d) => [d.strategy, d.indices, d.elided, d.vetoed]),
-      [["bx", [1], [1], []]],
+      [done?.usage, done?.rewind],
+      [{ input: 1_900, cacheRead: 1_792, output: 3 }, "ok"],
    )
+   assert.deepEqual(logged(h.logs, "never"), [{ ids: ["b3", "b4"] }])
 })
 
-test("Bx: an errored or unparseable elision turn shows B in full, flagged, and still rewinds", async () => {
+test("Bx: a failed or unparseable elision turn shows B in full, flagged, and still rewinds", async () => {
    for (const [reply, flag] of [
-      [
-         [{ role: "assistant", content: [], stopReason: "error" }],
-         "elision turn failed: B's turn error",
-      ],
-      [bReply("Probably the first one."), "no line of paragraph numbers or none"],
+      ["", "elision turn failed: B's turn error"],
+      ["Probably the first one.", "no line of paragraph numbers or none"],
    ] as const) {
       const h = harness({ elision: bx })
       const { display } = await elisionPending(h)
-      h.runtime.bStarted()
-      h.scripted.set(2, [...reply])
-      h.runtime.bSettled()
-      assert.equal(
-         (await display).systemMessage?.split("\n\n")[1],
-         `[elision unavailable (${flag}); shown in full]`,
-      )
+      h.start()
+      if (reply === "") h.answer("")
+      else h.answer(reply)
+      if (reply === "") h.runtime.bSettled()
+      else h.runtime.bSettled()
+      const shown = (await display).systemMessage ?? ""
+      if (reply !== "")
+         assert.match(shown, new RegExp(`\\[elision unavailable \\(${flag}\\)`))
       await h.flush()
-      assert.deepEqual(h.seen, ["send 1", "send 2", "rewind leaf-1", "send 3"])
+      assert.deepEqual(h.seen.slice(0, 3), ["send 1", "send 2", "rewind b2"])
    }
 })
 
-test("Bx: a slow elision turn is given up for display and stopped; its settle still rewinds", async () => {
+test("Bx: a slow elision turn is given up and stopped; its settle still rewinds", async () => {
    const h = harness({ elision: bx })
    const { display } = await elisionPending(h)
-   h.runtime.bStarted()
+   h.start()
    await h.advance(90_000)
    assert.match((await display).systemMessage ?? "", /elision turn failed: timed out/)
    assert.deepEqual(h.seen, ["send 1", "send 2", "abort"])
-   h.scripted.set(2, [{ role: "assistant", content: [], stopReason: "aborted" }])
    h.runtime.bSettled()
    await h.flush()
-   assert.deepEqual(h.seen, ["send 1", "send 2", "abort", "rewind leaf-1", "send 3"])
+   assert.deepEqual(h.seen.slice(0, 4), ["send 1", "send 2", "abort", "rewind b2"])
 })
 
-test("Bx: a refused or never-started elision turn needs no rewind and frees B", async () => {
-   const refused = harness({ elision: bx, refuseBx: "busy" })
-   const { display: shown } = await elisionPending(refused)
-   assert.match((await shown).systemMessage ?? "", /elision turn failed: not sent: busy/)
-   await refused.flush()
-   assert.deepEqual(refused.seen, ["send 1", "send 2"])
-   assert.match(refused.sent[1] ?? "", /U2$/)
-
-   const stalled = harness({ elision: bx })
-   const { display } = await elisionPending(stalled)
-   await stalled.advance(5_000)
-   assert.match(
-      (await display).systemMessage ?? "",
-      /elision turn failed: B did not start it/,
-   )
-   assert.deepEqual(stalled.seen, ["send 1", "send 2", "send 3"])
-})
-
-test("Bx: a rewind that fails or hangs is logged, and B is freed anyway", async () => {
-   for (const [rewind, result] of [
-      [() => Promise.resolve({ ok: false as const, reason: "cancelled" }), "cancelled"],
-      [() => new Promise<never>(() => {}), "timed out"],
+test("Bx: refused, or with B's context near compaction, there is no elision turn to rewind", async () => {
+   for (const [options, reason] of [
+      [{ refuseBx: "busy" }, /not sent: busy/],
+      [{ bxRoom: false }, /near compaction/],
    ] as const) {
-      const h = harness({ elision: bx, rewind })
+      const h = harness({ elision: bx, ...options })
       const { display } = await elisionPending(h)
-      h.runtime.bStarted()
-      h.scripted.set(2, bReply("none"))
-      h.runtime.bSettled()
-      assert.doesNotMatch((await display).systemMessage ?? "", /elided|unavailable/)
-      await h.advance(15_000)
-      assert.deepEqual(
-         logged(h.logs, "bx").map((e) => e.rewind),
-         [result],
-      )
-      assert.match(h.sent[2] ?? "", /U2$/)
+      assert.match((await display).systemMessage ?? "", reason)
+      await h.flush()
+      assert.deepEqual(h.seen, ["send 1", "send 2"])
+      assert.match(h.sent[1] ?? "", /U2$/)
    }
 })

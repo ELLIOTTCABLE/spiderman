@@ -1,37 +1,37 @@
 import { isAbsolute, join } from "node:path"
 import { splitBlocks } from "../core/blocks.ts"
 import {
-   type BLedger,
    bAnswerText,
    bMessage,
    bOutcome,
    dedupeKey,
    displayChunks,
-   emptyLedger,
-   lastMessageUuid,
-   lastTurnStart,
+   plainPaths,
    reconcileWithLast,
-   sectioned,
-   withoutDelivered,
 } from "../core/bridge.ts"
-import { type Cursor, ccTrail } from "../core/cc-trail.ts"
-import { CHUNK_CHARS, chunkPackage } from "../core/chunk.ts"
+import { ccNewPrompt, ccView } from "../core/cc-trail.ts"
+import { CHUNK_CHARS, chunkPackage, MAX_CHUNKS } from "../core/chunk.ts"
+import {
+   type Anchor,
+   carrierHash,
+   type Delivery,
+   ledgerLine,
+   matchBroken,
+   owed,
+   type SideView,
+} from "../core/coherence.ts"
 import {
    bxPrompt,
    ELISION_TIMEOUT_MS,
    type IndexParse,
    parseIndices,
 } from "../core/elision.ts"
-import {
-   formatPeerPackage,
-   type PackageEnv,
-   type PackageMemory,
-   packageText,
-} from "../core/package.ts"
-import { piTrail } from "../core/pi-trail.ts"
+import { formatPeerPackage, type PackageEnv, packageText } from "../core/package.ts"
+import type { Delivered } from "../core/pi-trail.ts"
 import { type HookReply, type HookRequest, STATE_DIR } from "../core/protocol.ts"
 import { renderElided } from "../core/render.ts"
 import { peerStore, type StoreFs } from "../core/store.ts"
+import type { Trail } from "../core/trail.ts"
 import {
    type BOutcome,
    initialTurnState,
@@ -51,6 +51,9 @@ export interface RuntimeFs extends StoreFs {
    writeText(path: string, data: string): void
    appendFileSync(path: string, data: string): void
    exists(path: string): boolean
+   size(path: string): number | undefined
+   /** what a growing file gained since `offset` bytes */
+   readFrom(path: string, offset: number): string | undefined
 }
 
 export interface BSide {
@@ -60,10 +63,17 @@ export interface BSide {
    /** B's leaf, if a rewind can land exactly on it */
    rewindPoint(): string | undefined
    messagesSince(leafId: string | undefined): readonly unknown[]
+   idsSince(leafId: string | undefined): readonly string[]
+   view(options: {
+      readonly delivered: (hash: string) => Delivered | undefined
+      readonly never: ReadonlySet<string>
+   }): SideView
    /** what followed `entryId` stays in the file but leaves B's context */
    rewind(entryId: string): Promise<Outcome>
    /** the run still settles */
    abort(): void
+   /** an elision turn here would leave room before pi's auto-compaction */
+   bxRoom(): boolean
 }
 
 export type Outcome =
@@ -83,6 +93,9 @@ export interface RuntimeConfig extends TurnConfig {
    readonly chunkDelayMs: number
    /** a B turn that hasn't started by then is treated as a failed start */
    readonly startTimeoutMs: number
+   /** how long B's start waits for CC to write the prompt it answers */
+   readonly entryWaitMs: number
+   readonly pollMs: number
 }
 
 export interface RuntimeDeps {
@@ -98,19 +111,27 @@ export interface RuntimeDeps {
    readonly elision: Elision
    readonly log: (entry: Record<string, unknown>) => void
    readonly config: RuntimeConfig
+   /** rebuilt from the sidecar on resume */
+   readonly restored?: {
+      readonly ledger: readonly Delivery[]
+      readonly never: readonly string[]
+   }
+   /** B is free again after an elision turn and its rewind */
+   readonly bxDone?: () => void
 }
 
 interface BTurnData {
+   /** B's leaf before this turn's message */
    readonly leaf: string | undefined
    readonly messages?: readonly unknown[]
    readonly outcome?: BOutcome
-   /** the human messages this turn answered */
-   readonly prompts?: readonly string[]
+   readonly delivery?: string
 }
 
 interface BxRun {
    readonly turn: number
    readonly rewindTo: string
+   readonly text: string
    readonly sentAt: number
    started: boolean
    readonly answer: Deferred<string>
@@ -118,6 +139,8 @@ interface BxRun {
 
 const REWIND_TIMEOUT_MS = 15_000
 const LOGGED_REPLY_CHARS = 200
+const BUDGET = MAX_CHUNKS * CHUNK_CHARS
+const OMITTED = "[earlier peer history omitted]"
 
 /** The effectful shell around the turn reducer: hook requests in, B turns and replies out. */
 export class Runtime {
@@ -129,19 +152,20 @@ export class Runtime {
       { request: HookRequest; resolve: (r: HookReply) => void }
    >()
    readonly #turns = new Map<number, BTurnData>()
-   readonly #deliveries = new Map<string, string[]>()
+   readonly #toA = new Map<number, string[]>()
    readonly #displays = new Map<number, Promise<string[]>>()
-   #aSession: string | undefined
+   /** transcript size when each prompt was submitted: CC writes the prompt's entry after it */
+   readonly #submitted = new Map<string, number>()
+   #ledger: Delivery[]
+   readonly #never: Set<string>
    #aTranscript: string | undefined
-   #aCut: Cursor | undefined
-   /** per receiver: files it was already pointed at */
-   #toA: PackageMemory | undefined
-   #toB: PackageMemory | undefined
-   /** keys of A's trail items and the human messages B already has */
-   #bLedger: BLedger = emptyLedger
-   #bRunning: { turn: number; started: boolean } | undefined
+   #bRunning: { turn: number; started: boolean; text: string } | undefined
    #bx: BxRun | undefined
    readonly #bxAnswers = new Map<number, Promise<string>>()
+   /** a turn the human started in B's own client, and B's leaf before it */
+   #aside: { from: string | undefined } | undefined
+   #runKind: { kind: "ours" | "bx" | "aside"; from: string | undefined } | undefined
+   #breakerShown = false
    #cancelWake: (() => void) | undefined
    #nextId = 0
    #disposed = false
@@ -149,32 +173,68 @@ export class Runtime {
    constructor(deps: RuntimeDeps) {
       this.#deps = deps
       this.#stateDir = `${deps.projectDir}/${STATE_DIR}`
+      this.#ledger = [...(deps.restored?.ledger ?? [])]
+      this.#never = new Set(deps.restored?.never ?? [])
    }
 
    handle(request: HookRequest): Promise<HookReply> {
       const requestId = `q${++this.#nextId}`
+      if (request.kind === "prompt" && request.promptId !== undefined) {
+         const size = this.#deps.fs.size(request.transcriptPath)
+         if (!this.#submitted.has(request.promptId) && size !== undefined)
+            this.#submitted.set(request.promptId, size)
+      }
       return new Promise((resolve) => {
          this.#requests.set(requestId, { request, resolve })
          this.#dispatch(this.#event(requestId, request), request)
       })
    }
 
+   bxInFlight(): boolean {
+      return this.#bx !== undefined
+   }
+
+   /** pi's `before_agent_start`: tells our runs from the human's own. */
+   bRunStarting(prompt: string): void {
+      const from = this.#deps.b.leafId()
+      if (this.#bx !== undefined && !this.#bx.started && prompt === this.#bx.text)
+         this.#runKind = { kind: "bx", from }
+      else if (this.#bRunning !== undefined && !this.#bRunning.started)
+         this.#runKind = {
+            kind: prompt === this.#bRunning.text ? "ours" : "aside",
+            from,
+         }
+      else this.#runKind = { kind: "aside", from }
+   }
+
+   /** pi's `agent_start`; a run nobody announced is the human's. */
    bStarted(): void {
-      if (this.#bx !== undefined) this.#bx.started = true
-      else if (this.#bRunning !== undefined)
-         this.#bRunning = { ...this.#bRunning, started: true }
+      const run = this.#runKind ?? { kind: "aside", from: this.#deps.b.leafId() }
+      this.#runKind = undefined
+      if (run.kind === "bx" && this.#bx !== undefined) this.#bx.started = true
+      else if (run.kind === "ours" && this.#bRunning !== undefined)
+         this.#bRunning.started = true
+      else {
+         this.#aside = { from: run.from }
+         this.#dispatch({ type: "asideStarted" })
+      }
    }
 
    /** pi's `agent_settled`: the end of a run, including retries and compaction. */
    bSettled(): void {
       const bx = this.#bx
-      if (bx !== undefined) {
+      if (bx?.started) {
          this.#bx = undefined
          this.#bxSettled(bx)
          return
       }
+      if (this.#aside !== undefined) {
+         this.#aside = undefined
+         this.#dispatch({ type: "asideSettled" })
+         return
+      }
       const running = this.#bRunning
-      if (running === undefined) return
+      if (running === undefined || !running.started) return
       this.#bRunning = undefined
       const data = this.#turns.get(running.turn)
       const messages = this.#deps.b.messagesSince(data?.leaf)
@@ -253,17 +313,8 @@ export class Runtime {
       )
       this.#state = state
       if (request !== undefined && state.pairedSession === request.ccSessionId)
-         this.#trackA(request)
+         this.#aTranscript = request.transcriptPath
       for (const effect of effects) this.#run(effect)
-   }
-
-   #trackA(request: HookRequest) {
-      // a new CC session (e.g. /clear) has a new transcript file: its history isn't the peer's news
-      if (request.ccSessionId !== this.#aSession) {
-         this.#aSession = request.ccSessionId
-         this.#aCut = undefined
-      }
-      this.#aTranscript = request.transcriptPath
    }
 
    #run(effect: TurnEffect) {
@@ -322,8 +373,10 @@ export class Runtime {
          case "empty":
             return {}
          case "deliver": {
-            const chunk = this.#deliverChunks(reply.turns, part.count)[part.index - 1]
-            return chunk === undefined ? {} : { additionalContext: chunk }
+            if (request.kind !== "prompt") return {}
+            const chunks = this.#deliverToA(reply.delivery, part.count, request)
+            const chunk = chunks[part.index - 1]
+            return chunk === undefined ? {} : chunk
          }
          case "display": {
             const aText =
@@ -336,23 +389,76 @@ export class Runtime {
       }
    }
 
-   #deliverChunks(turns: readonly number[], count: number): string[] {
-      const key = `${turns.join(",")}/${count}`
-      const cached = this.#deliveries.get(key)
-      if (cached !== undefined) return cached
-      const sections = turns.flatMap((turn) => {
-         const data = this.#turns.get(turn)
-         const trail = piTrail(data?.messages ?? [])
-         // an empty peer block still costs A tokens on every later request
-         if (trail.items.length === 0 && trail.issues.length === 0) return []
-         const pkg = formatPeerPackage(trail, this.#packageEnv(), this.#toA)
-         this.#toA = pkg.memory
-         return [{ pkg, prompt: (data?.prompts ?? []).join(" / ") }]
+   #carrier = (text: string) => carrierHash(this.#deps.hash, text)
+
+   #aView(transcriptPath: string, leaf?: string): SideView {
+      const { fs } = this.#deps
+      return ccView(fs.readText(transcriptPath) ?? "", {
+         transcriptPath,
+         exists: (p) => fs.exists(p),
+         carrier: this.#carrier,
+         ...(leaf === undefined ? {} : { leaf }),
       })
-      if (sections.length === 0) return []
-      const pkg = sectioned(sections)
+   }
+
+   #bView(a: SideView): SideView {
+      const aPrompts = new Set(
+         a.live.flatMap((e) => (e.prompt === undefined ? [] : [e.prompt.trim()])),
+      )
+      const toB = new Map(
+         this.#ledger
+            .filter((d) => d.to === "b")
+            .flatMap((d) => d.chunks.map((h) => [h, d] as const)),
+      )
+      return this.#deps.b.view({
+         never: this.#never,
+         delivered: (hash) => {
+            const d = toB.get(hash)
+            if (d === undefined) return undefined
+            const asked =
+               d.prompts.length > 0 && !d.prompts.some((p) => aPrompts.has(p.trim()))
+            return { prompts: d.prompts, asked }
+         },
+      })
+   }
+
+   /** where B's settled record ends: before whatever run is still going */
+   #bThrough(): string | null | undefined {
+      if (this.#bx !== undefined) return this.#bx.rewindTo
+      if (this.#bRunning !== undefined)
+         return this.#turns.get(this.#bRunning.turn)?.leaf ?? null
+      if (this.#aside !== undefined) return this.#aside.from ?? null
+      return undefined
+   }
+
+   #deliverToA(
+      delivery: number,
+      count: number,
+      request: Extract<HookRequest, { kind: "prompt" }>,
+   ): HookReply[] {
+      const cached = this.#toA.get(delivery)
+      if (cached !== undefined)
+         return cached.map((additionalContext) => ({ additionalContext }))
+      this.#toA.set(delivery, [])
+      const a = this.#aView(request.transcriptPath)
+      if (matchBroken(this.#ledger, "a", a)) {
+         if (this.#breakerShown) return []
+         this.#breakerShown = true
+         this.#deps.log({ what: "match-broken", to: "a", at: this.#deps.now() })
+         return [
+            {
+               systemMessage:
+                  "spiderman: Claude Code isn't keeping the peer's answers where spiderman can find them; it stopped re-sending them. Details are in pi's sidecar log.",
+            },
+         ]
+      }
+      const b = this.#bView(a)
+      const due = owed(this.#ledger, "a", a, b, this.#bThrough())
+      if (due.ids.length === 0) return []
+      const { pkg, ids } = this.#fitted(due.ids, b)
+      const tail = a.live.at(-1)?.id
       const fullPath = this.#writeState(
-         `turns/${this.#deps.sessionId}/b-${turns.join("-")}.package.md`,
+         `turns/${this.#deps.sessionId}/to-a-${delivery}.package.md`,
          packageText(pkg),
       )
       const chunks = chunkPackage(pkg, {
@@ -360,8 +466,52 @@ export class Runtime {
          maxChars: CHUNK_CHARS,
          fullPath,
       })
-      this.#deliveries.set(key, chunks)
-      return chunks
+      this.#record({
+         id: this.#deliveryId(),
+         to: "a",
+         chunks: chunks.map(this.#carrier),
+         ids,
+         ahead: [],
+         prompts: [],
+         ...(tail === undefined ? {} : { sentAfter: tail }),
+         ridesWith: request.prompt,
+         ...(due.floor === undefined ? {} : { floor: due.floor }),
+      })
+      this.#toA.set(delivery, chunks)
+      return chunks.map((additionalContext) => ({ additionalContext }))
+   }
+
+   /** Re-sends past the budget keep the newest entries; the oldest count as sent, marked once. */
+   #fitted(
+      ids: readonly string[],
+      view: SideView,
+      extend: (trail: Trail) => Trail = (t) => t,
+   ): { pkg: ReturnType<typeof formatPeerPackage>; ids: readonly string[] } {
+      const env = this.#packageEnv()
+      let kept = ids
+      let pkg = formatPeerPackage(extend(view.trail(kept)), env)
+      while (packageText(pkg).length > BUDGET && kept.length > 1) {
+         kept = kept.slice(Math.ceil(kept.length / 4))
+         const trimmed = formatPeerPackage(extend(view.trail(kept)), env)
+         const [opening, ...rest] = trimmed.segments
+         pkg = {
+            ...trimmed,
+            segments:
+               opening === undefined
+                  ? rest
+                  : [opening, { kind: "frame", text: OMITTED }, ...rest],
+         }
+      }
+      return { pkg, ids }
+   }
+
+   #record(delivery: Delivery) {
+      this.#ledger.push(delivery)
+      this.#deps.log({ ...ledgerLine.delivered(delivery), at: this.#deps.now() })
+   }
+
+   #deliveryId(): string {
+      return `d${this.#deps.now().toString(36)}-${++this.#nextId}`
    }
 
    #displayChunks(turn: number, count: number, aText: string): Promise<string[]> {
@@ -448,12 +598,20 @@ export class Runtime {
       this.#bxAnswers.set(effect.turn, answer.promise)
       const bText = bAnswerText(this.#turns.get(effect.turn)?.messages ?? [])
       const rewindTo = b.rewindPoint()
-      if (rewindTo === undefined) {
-         answer.reject(new Error("B's last entry is no point to rewind to"))
-         this.#bxDone(effect.turn, { sent: false, reason: "no rewind point" })
+      // a compaction it set off would be rewound away, and then happen again
+      const refusal =
+         rewindTo === undefined
+            ? "B's last entry is no point to rewind to"
+            : b.bxRoom()
+              ? undefined
+              : "B's context is near compaction"
+      if (refusal !== undefined || rewindTo === undefined) {
+         answer.reject(new Error(refusal ?? "no rewind point"))
+         this.#bxDone(effect.turn, { sent: false, reason: refusal })
          return
       }
-      const sent = b.send(bxPrompt(effect.aText, splitBlocks(bText)))
+      const text = bxPrompt(effect.aText, splitBlocks(bText))
+      const sent = b.send(text)
       if (!sent.ok) {
          answer.reject(new Error(`not sent: ${sent.reason}`))
          this.#bxDone(effect.turn, { sent: false, reason: sent.reason })
@@ -462,6 +620,7 @@ export class Runtime {
       const run: BxRun = {
          turn: effect.turn,
          rewindTo,
+         text,
          sentAt: now(),
          started: false,
          answer,
@@ -485,6 +644,10 @@ export class Runtime {
    #bxSettled(run: BxRun) {
       const { b, now, setTimer } = this.#deps
       const messages = b.messagesSince(run.rewindTo)
+      // never delivered, even if the rewind below fails
+      const ids = b.idsSince(run.rewindTo)
+      for (const id of ids) this.#never.add(id)
+      this.#deps.log({ what: "never", ids, at: now() })
       const outcome = bOutcome(messages)
       const reply = bAnswerText(messages)
       if (outcome === "completed") run.answer.resolve(reply)
@@ -509,70 +672,97 @@ export class Runtime {
 
    #bxDone(turn: number, detail: Record<string, unknown>) {
       this.#deps.log({ what: "bx", turn, ...detail, at: this.#deps.now() })
-      queueMicrotask(() => this.#dispatch({ type: "bxDone", turn }))
+      queueMicrotask(() => {
+         this.#dispatch({ type: "bxDone", turn })
+         this.#deps.bxDone?.()
+      })
    }
 
    #startB(effect: Extract<TurnEffect, { type: "startB" }>) {
-      const { fs, b, config } = this.#deps
       const transcriptPath = this.#aTranscript
-      const transcript =
-         transcriptPath === undefined ? undefined : fs.readText(transcriptPath)
-      const until = effect.until === "end" ? undefined : effect.until
-      // committed only once B accepts the message: a refused start is retried from the same place
-      let ledger = this.#bLedger
-      let toB = this.#toB
-      let cut: Cursor | undefined = this.#aCut ?? until
-      let aPackage: string | undefined
-
-      if (transcript !== undefined && transcriptPath !== undefined) {
-         // first B turn after pairing: A's last completed turn, not its whole history
-         const after = this.#aCut ?? lastTurnStart(transcript, until?.promptId)
-         if (after !== undefined) {
-            const span = {
-               ...(after === "top" ? {} : { after }),
-               ...(until === undefined ? {} : { until }),
-            }
-            const sliced = ccTrail(transcript, span, {
-               transcriptPath,
-               exists: (p) => fs.exists(p),
+      if (effect.until === "end" || transcriptPath === undefined) {
+         this.#sendB(effect, undefined)
+         return
+      }
+      const { promptId } = effect.until
+      this.#awaitPrompt(transcriptPath, promptId, effect.prompts[0] ?? "").then(
+         (entry) => {
+            if (this.#disposed) return
+            if (entry !== undefined) return this.#sendB(effect, entry)
+            // another hook blocked it, or it never ran: A won't answer it, so B mustn't
+            this.#deps.log({
+               what: "promptNeverWritten",
+               turn: effect.turn,
+               at: this.#deps.now(),
             })
-            const whole =
-               until === undefined
-                  ? reconcileWithLast(sliced, effect.lastAssistantMessage)
-                  : sliced
-            const fresh = withoutDelivered(whole, ledger)
-            const trail = fresh.trail
-            const appended = whole.items.length > sliced.items.length
-            ledger = appended
-               ? { ...fresh.ledger, reconciled: effect.lastAssistantMessage }
-               : fresh.ledger
-            if (trail.issues.length > 0) {
-               this.#deps.log({
-                  what: "aTrailIssues",
-                  issues: trail.issues,
-                  at: this.#deps.now(),
-               })
-            }
-            if (trail.items.length > 0) {
-               const pkg = formatPeerPackage(trail, this.#packageEnv(), toB)
-               toB = pkg.memory
-               aPackage = packageText(pkg)
-            }
-         }
-         const uuid = lastMessageUuid(transcript)
-         cut = until ?? (uuid === undefined ? cut : { uuid })
-      }
-      ledger = {
-         ...ledger,
-         prompts: [...ledger.prompts, ...effect.prompts.map((p) => p.trim())],
-      }
+            this.#dispatch({ type: "bDropped", turn: effect.turn })
+         },
+      )
+   }
 
+   /** CC writes a prompt's entry only after its hooks return: wait for it, never guess. */
+   #awaitPrompt(
+      path: string,
+      promptId: string,
+      prompt: string,
+   ): Promise<string | undefined> {
+      const { fs, now, setTimer, config } = this.#deps
+      const offset = this.#submitted.get(promptId) ?? 0
+      const deadline = now() + config.entryWaitMs
+      return new Promise((resolve) => {
+         const poll = () => {
+            if (this.#disposed) return resolve(undefined)
+            const tail = fs.readFrom(path, offset)
+            const found =
+               tail === undefined ? undefined : ccNewPrompt(tail, prompt, promptId)
+            if (found !== undefined || now() >= deadline) return resolve(found)
+            setTimer(config.pollMs, poll)
+         }
+         poll()
+      })
+   }
+
+   #sendB(effect: Extract<TurnEffect, { type: "startB" }>, entry: string | undefined) {
+      const { b, config, fs, projectDir } = this.#deps
+      const transcriptPath = this.#aTranscript
+      const a =
+         transcriptPath === undefined ? undefined : this.#aView(transcriptPath, entry)
+      let aPackage: string | undefined
+      let ids: readonly string[] = []
+      let floor: string | null | undefined
+      const ahead: Anchor[] = []
+      if (a !== undefined) {
+         // the prompt itself goes as the human's message; its entry is how B "has" it
+         const through = entry === undefined ? undefined : (a.parent(entry) ?? null)
+         const due = owed(this.#ledger, "b", this.#bView(a), a, through)
+         floor = due.floor
+         const last = effect.lastAssistantMessage
+         const extend = (trail: Trail) =>
+            entry === undefined ? reconcileWithLast(trail, last) : trail
+         if (entry === undefined) {
+            // the transcript may lag at Stop: what we send ahead of it is matched later
+            const sliced = a.trail(due.ids)
+            if (reconcileWithLast(sliced, last) !== sliced && last !== undefined)
+               ahead.push({ text: last })
+            ahead.push(...effect.prompts.map((prompt) => ({ prompt })))
+         }
+         if (due.ids.length > 0 || ahead.some((x) => "text" in x)) {
+            const fitted = this.#fitted(due.ids, a, extend)
+            aPackage = packageText(fitted.pkg)
+            ids = fitted.ids
+         }
+      }
+      const prompts = effect.prompts.map((p) =>
+         plainPaths(p, projectDir, (x) => fs.exists(x)),
+      )
+      const message = bMessage(aPackage, prompts)
       const leaf = b.leafId()
-      const sent = b.send(bMessage(aPackage, effect.prompts))
+      const sent = b.send(message)
       this.#deps.log({
          what: "startB",
          turn: effect.turn,
          sent,
+         entry: entry ?? effect.until,
          aPackageChars: aPackage?.length ?? 0,
          at: this.#deps.now(),
       })
@@ -582,14 +772,24 @@ export class Runtime {
          )
          return
       }
-      this.#aCut = cut
-      this.#toB = toB
-      this.#bLedger = ledger
-      this.#turns.set(effect.turn, { leaf, prompts: effect.prompts })
-      this.#bRunning = { turn: effect.turn, started: false }
+      const delivery: Delivery = {
+         id: this.#deliveryId(),
+         to: "b",
+         chunks: [this.#carrier(message)],
+         ids: entry === undefined ? ids : [...ids, entry],
+         ahead,
+         prompts,
+         ...(leaf === undefined ? {} : { sentAfter: leaf }),
+         ...(floor === undefined ? {} : { floor }),
+      }
+      this.#record(delivery)
+      this.#turns.set(effect.turn, { leaf, delivery: delivery.id })
+      this.#bRunning = { turn: effect.turn, started: false, text: message }
       this.#deps.setTimer(config.startTimeoutMs, () => {
          if (this.#bRunning?.turn !== effect.turn || this.#bRunning.started) return
          this.#bRunning = undefined
+         this.#ledger = this.#ledger.filter((d) => d.id !== delivery.id)
+         this.#deps.log({ ...ledgerLine.lost(delivery.id), at: this.#deps.now() })
          this.#dispatch({ type: "bFailed", turn: effect.turn, reason: "B did not start" })
       })
    }

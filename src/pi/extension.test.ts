@@ -1,11 +1,12 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { HOOK_PATH, type HookReply } from "../core/protocol.ts"
 import { STANDING_FOR_B } from "../core/standing.ts"
+import { isRecord } from "../core/validate.ts"
 import spiderman from "./extension.ts"
 
 type Handler = (event: unknown, ctx: unknown) => unknown
@@ -56,12 +57,14 @@ function fakePi(
       },
       isIdle: () => true,
       abort: () => {},
+      getContextUsage: () => undefined,
       ui: { notify: (message: string) => void notices.push(message) },
       sessionManager: {
          getSessionFile: () => undefined,
          getSessionId: () => "pi-session",
          getLeafId: () => branch.at(-1)?.id ?? null,
          getLeafEntry: () => branch.at(-1),
+         getEntry: (id: string) => branch.find((e) => e.id === id),
          getBranch: () => branch,
       },
    }
@@ -94,6 +97,7 @@ function fakePi(
             setImmediate(() => void command(args ?? "", commandCtx))
          else sent.push(text)
       },
+      getSettings: () => ({}),
       appendEntry: (customType: string, data: unknown) =>
          void branch.push({ type: "custom", id: `c${branch.length}`, customType, data }),
    }
@@ -106,7 +110,7 @@ function fakePi(
 
 async function until(condition: () => boolean) {
    for (let i = 0; i < 200 && !condition(); i++)
-      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setTimeout(resolve, 10))
    assert.ok(condition(), "condition never held")
 }
 
@@ -126,7 +130,14 @@ async function post(cwd: string, body: unknown): Promise<HookReply> {
       },
       body: JSON.stringify(body),
    })
-   return (await res.json()) as HookReply
+   const reply = (await res.json()) as HookReply
+   // Claude Code writes the prompt's entry only once its hooks have answered
+   if (isRecord(body) && body.kind === "prompt")
+      appendFileSync(
+         String(body.transcriptPath),
+         `${JSON.stringify({ type: "user", uuid: `u-${body.promptId}`, promptId: body.promptId, message: { role: "user", content: body.prompt } })}\n`,
+      )
+   return reply
 }
 
 test("the extension pairs, relays a turn, and cleans up after itself", async () => {
@@ -135,7 +146,7 @@ test("the extension pairs, relays a turn, and cleans up after itself", async () 
    try {
       await pi.emit("session_start", { reason: "startup" })
       assert.equal(readFileSync(join(cwd, ".spiderman", ".gitignore"), "utf8"), "*\n")
-      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "a.jsonl"), cwd }
       assert.deepEqual(
          await post(cwd, { kind: "session-start", source: "startup", ...common }),
          {},
@@ -148,8 +159,10 @@ test("the extension pairs, relays a turn, and cleans up after itself", async () 
          part: { index: 1, count: 1 },
          ...common,
       })
+      await until(() => pi.sent.length === 1)
       assert.deepEqual(pi.sent, ["[the human's message]\nU1"])
 
+      pi.emit("before_agent_start", { prompt: pi.sent.at(-1) ?? "", systemPrompt: "" })
       pi.emit("agent_start")
       pi.branch.push({
          type: "message",
@@ -193,15 +206,12 @@ test("standing instructions are appended once and identically every turn", () =>
    )
 })
 
-test("typing in B's pane is swallowed with a pointer to Claude Code", () => {
+test("typing in B's pane is the human's own turn, untouched", () => {
    const pi = fakePi("unused")
    assert.deepEqual(pi.emit("input", { source: "interactive", text: "hi" }), {
-      action: "handled",
-   })
-   assert.match(pi.notices[0] ?? "", /type in Claude Code/)
-   assert.deepEqual(pi.emit("input", { source: "extension", text: "x" }), {
       action: "continue",
    })
+   assert.deepEqual(pi.notices, [])
 })
 
 test("B on a provider outside the allowlist is never sent the human's prompt", async () => {
@@ -209,7 +219,7 @@ test("B on a provider outside the allowlist is never sent the human's prompt", a
    const pi = fakePi(cwd, "openai")
    try {
       await pi.emit("session_start", { reason: "startup" })
-      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "a.jsonl"), cwd }
       await post(cwd, {
          kind: "prompt",
          prompt: "U1",
@@ -217,6 +227,7 @@ test("B on a provider outside the allowlist is never sent the human's prompt", a
          part: { index: 1, count: 1 },
          ...common,
       })
+      await until(() => pi.notices.length > 0)
       assert.deepEqual(pi.sent, [])
       assert.match(pi.notices[0] ?? "", /not one of openai-codex/)
    } finally {
@@ -225,15 +236,19 @@ test("B on a provider outside the allowlist is never sent the human's prompt", a
    }
 })
 
-test("/tree in B's pane is cancelled with a pointer to Claude Code", () => {
+test("/tree in B's pane is the human's, and pinned so a restart resumes where they went", () => {
    const pi = fakePi("unused")
-   assert.deepEqual(pi.emit("session_before_tree", {}), { cancel: true })
-   assert.match(pi.notices[0] ?? "", /type in Claude Code/)
+   assert.equal(
+      pi.emit("session_before_tree", { preparation: { targetId: "x" } }),
+      undefined,
+   )
+   pi.emit("session_tree", { oldLeafId: "b9", newLeafId: "b2" })
+   assert.deepEqual(pi.branch.at(-1)?.data, { from: "b9", to: "b2" })
 })
 
 async function displayedTurn(pi: ReturnType<typeof fakePi>, cwd: string) {
    await pi.emit("session_start", { reason: "startup" })
-   const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+   const common = { ccSessionId: "cc", transcriptPath: join(cwd, "a.jsonl"), cwd }
    await post(cwd, {
       kind: "prompt",
       prompt: "U1",
@@ -241,6 +256,8 @@ async function displayedTurn(pi: ReturnType<typeof fakePi>, cwd: string) {
       part: { index: 1, count: 1 },
       ...common,
    })
+   await until(() => pi.sent.length === 1)
+   pi.emit("before_agent_start", { prompt: pi.sent.at(-1) ?? "", systemPrompt: "" })
    pi.emit("agent_start")
    pi.branch.push({
       type: "message",
@@ -303,7 +320,7 @@ test("Bx: B's own turn picks the elided paragraphs, then B is rewound to before 
    const pi = fakePi(cwd, "openai-codex", { "spiderman-strategy": "bx" })
    try {
       await pi.emit("session_start", { reason: "startup" })
-      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "a.jsonl"), cwd }
       await post(cwd, {
          kind: "prompt",
          prompt: "U1",
@@ -311,6 +328,8 @@ test("Bx: B's own turn picks the elided paragraphs, then B is rewound to before 
          part: { index: 1, count: 1 },
          ...common,
       })
+      await until(() => pi.sent.length === 1)
+      pi.emit("before_agent_start", { prompt: pi.sent.at(-1) ?? "", systemPrompt: "" })
       pi.emit("agent_start")
       pi.branch.push(assistant("m1", "Same as A.\n\nOnly B says this."))
       pi.emit("agent_settled")
@@ -327,7 +346,17 @@ test("Bx: B's own turn picks the elided paragraphs, then B is rewound to before 
          /^\[elision request[\s\S]*\n1: "Same as A\."\n2: "Only B says this\."\n/,
       )
 
+      pi.emit("before_agent_start", { prompt: pi.sent.at(-1) ?? "", systemPrompt: "" })
       pi.emit("agent_start")
+      assert.deepEqual(
+         pi.emit("input", { source: "interactive", text: "typed during Bx" }),
+         { action: "handled" },
+         "a steer into the elision turn would be rewound away",
+      )
+      assert.deepEqual(
+         pi.emit("session_before_tree", { preparation: { targetId: "x" } }),
+         { cancel: true },
+      )
       pi.branch.push({
          type: "message",
          id: "bx-u",
@@ -347,13 +376,17 @@ test("Bx: B's own turn picks the elided paragraphs, then B is rewound to before 
          "the elision exchange is off the branch; a marker entry pins the leaf",
       )
       assert.deepEqual(pi.branch.at(-1)?.data, { from: "bx-a", to: "m1" })
-      assert.equal(pi.sent.length, 2, "the rewind command is never a message to B")
-      assert.deepEqual(pi.notices, [], "our own navigation passes the /tree guard")
-      assert.deepEqual(
+      await until(() => pi.sent.length === 3)
+      assert.equal(pi.sent[2], "typed during Bx", "held, then sent once B is rewound")
+      assert.equal(
+         pi.notices.length,
+         3,
+         "held, cancelled /tree, resubmitted; never our own rewind",
+      )
+      assert.equal(
          pi.emit("session_before_tree", { preparation: { targetId: "m1" } }),
-         {
-            cancel: true,
-         },
+         undefined,
+         "once B is rewound, /tree is the human's again",
       )
    } finally {
       await pi.emit("session_shutdown", { reason: "quit" })
@@ -393,7 +426,7 @@ test("a rewind that runs after B has moved on navigates nowhere", async () => {
    const pi = fakePi(cwd, "openai-codex", { "spiderman-strategy": "bx" })
    try {
       await pi.emit("session_start", { reason: "startup" })
-      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "none.jsonl"), cwd }
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "a.jsonl"), cwd }
       await post(cwd, {
          kind: "prompt",
          prompt: "U1",
@@ -401,6 +434,8 @@ test("a rewind that runs after B has moved on navigates nowhere", async () => {
          part: { index: 1, count: 1 },
          ...common,
       })
+      await until(() => pi.sent.length === 1)
+      pi.emit("before_agent_start", { prompt: pi.sent.at(-1) ?? "", systemPrompt: "" })
       pi.emit("agent_start")
       pi.branch.push(assistant("m1", "Only B says this."))
       pi.emit("agent_settled")
@@ -412,6 +447,7 @@ test("a rewind that runs after B has moved on navigates nowhere", async () => {
          ...common,
       })
       await until(() => pi.sent.length === 2)
+      pi.emit("before_agent_start", { prompt: pi.sent.at(-1) ?? "", systemPrompt: "" })
       pi.emit("agent_start")
       pi.branch.push(assistant("bx-a", "none"))
       pi.emit("agent_settled")

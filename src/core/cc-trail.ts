@@ -491,3 +491,39 @@ function contentText(content: unknown): string {
       })
       .join("\n")
 }
+
+/**
+ * The user entry CC writes for a submitted prompt, once it has: found in what the transcript
+ * gained since the submit, by prompt id or by the prompt's own text.
+ */
+export function ccNewPrompt(
+   tail: string,
+   prompt: string,
+   promptId: string | undefined,
+): string | undefined {
+   const wanted = normalised(prompt)
+   for (const raw of tail.split("\n")) {
+      let entry: unknown
+      try {
+         entry = JSON.parse(raw)
+      } catch {
+         continue
+      }
+      if (!isRecord(entry) || entry.type !== "user" || entry.isMeta === true) continue
+      if (typeof entry.uuid !== "string") continue
+      const blocks = contentBlocks(entry)
+      if (blocks.some((b) => b.type === "tool_result")) continue
+      const content = isRecord(entry.message) ? entry.message.content : undefined
+      const text = typeof content === "string" ? content : textBlocks(blocks)
+      if (
+         (promptId !== undefined && entry.promptId === promptId) ||
+         normalised(text) === wanted
+      )
+         return entry.uuid
+   }
+   return undefined
+}
+
+function normalised(text: string): string {
+   return text.replace(/\r\n?/g, "\n").trim()
+}
