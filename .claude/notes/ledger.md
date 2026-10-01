@@ -188,9 +188,15 @@ human reads A_N + elided B_N, types U_{N+1}
 - **All 7 scenarios pass:** parallel start; packages carry pointers, not content; mid-turn submit doesn't stall; solo; pi-pane input swallowed; peer loss and re-pair; hand-back capture.
 - **Hook stdin has no `source` field**, for human or notification turns alike. Detection relies on the `<task-notification>` prefix. Notification turns get a fresh `prompt_id`.
 - **A's cache grows monotonically.**
-- **B's Codex cache does NOT extend.** `cacheRead` stays at the first cached prefix (P4: 18,176 at +1/+7/+35/+70 min; e2e: 1,536 flat) while uncached input grows every turn, even with a verified byte-stable, append-only payload.
-  - The first prefix survives 35-min gaps.
-  - This violates the cache-preservation requirement for long sessions. Under investigation: real-session evidence, a pi vs Codex CLI request diff, payload experiments.
+- **B's Codex cache: a false alarm, resolved (+SURE).** The Codex backend extends cached prefixes in blocks: 1,024 tokens on luna (offset 768), 128 on astra. P4 and the e2e turns added under one block, so `cacheRead` looked frozen.
+  - Real evidence: the human's own astra sessions hit 97.6% cache, with `cacheRead` growing turn over turn (33k → 709k in one session). Codex CLI rollouts behave identically.
+  - Luna experiments with ~2k added per turn: `cacheRead` 0/3,840/5,888/7,936.
+  - Changing nothing helped:
+    - SSE vs WebSocket: identical;
+    - Codex's `thread-id` header: identical;
+    - `prompt_cache_retention`: HTTP 400 unsupported.
+  - The first prefix survived a 35-min gap (P4). B's cache requirement holds.
+  - To measure caching, use turns that add ≥1,024 tokens, or read `usage.attribution` in the raw `response.completed`.
 - **Bugs being fixed:**
   - duplicate A-trail after a mid-turn + solo sequence;
   - `turns/b-N.md` collides across pi sessions;
