@@ -15,26 +15,20 @@ interface Started {
 }
 
 export interface PiViewOptions {
-   /** any entry's parent: null at a root, undefined for an unknown entry */
    readonly parent: (id: string) => string | null | undefined
-   /** a delivered text's carrier hash */
    readonly carrier: (text: string) => string
-   /** a message we delivered into this session, by carrier hash */
    readonly delivered: (hash: string) => Delivered | undefined
    /** entries never to deliver, e.g. an elision exchange a failed rewind left behind */
    readonly never: ReadonlySet<string>
 }
 
 export interface Delivered {
-   /** the human messages it carried */
    readonly prompts: readonly string[]
-   /** the receiver no longer holds them, so an answer to them must bring its question */
    readonly asked: boolean
 }
 
 interface Classified {
    readonly entry: ViewEntry
-   /** what the entry adds to a trail: a message, a delivery's answer starting, or a Bx exchange */
    readonly as:
       | { readonly kind: "message"; readonly message: unknown }
       | { readonly kind: "delivery"; readonly delivered: Delivered }
@@ -42,7 +36,6 @@ interface Classified {
       | { readonly kind: "none" }
 }
 
-// `unknown`: pi's session entry shapes, read defensively; other extensions add their own
 export function piView(branch: readonly unknown[], options: PiViewOptions): SideView {
    const classified = branch.flatMap((raw): Classified[] => {
       if (!isRecord(raw) || typeof raw.id !== "string") return []
@@ -107,7 +100,6 @@ export function piView(branch: readonly unknown[], options: PiViewOptions): Side
          let segment: unknown[] = []
          let turn: TrailItem | undefined
          let inBx = false
-         // each delivery's answer is read on its own, as each turn was before
          const flush = () => {
             const read = piTrail(segment)
             if (read.items.length > 0 && turn !== undefined) items.push(turn)

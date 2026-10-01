@@ -100,7 +100,6 @@ export function formatPeerPackage(trail: Trail, env: PackageEnv): PeerPackage {
             : "[the human's prompt to the peer]"
          segments.push({ kind: "prompt", text: `${said}\n${item.text}` })
       } else if (item.kind === "turn") {
-         // one answer needs no heading; several, each under the message it answers
          if (turns > 1)
             segments.push({ kind: "frame", text: turnLine(item, ++turn, turns) })
          if (item.asked)
@@ -552,7 +551,7 @@ interface Seen {
    readonly written: boolean
 }
 
-// within one package only: a receiver may since have rewound past an earlier one
+// per package only: the receiver may since have rewound past an earlier one
 class ReadMemory {
    readonly #seen = new Map<string, Seen[]>()
 

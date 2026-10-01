@@ -68,7 +68,6 @@ const settled = (
    answered,
 })
 
-// a delivery's number only keys its derivation
 const replies = (effects: TurnEffect[]) =>
    effects.flatMap((e) =>
       e.type === "respond"

@@ -74,7 +74,6 @@ interface Session {
    ctx: ExtensionContext
 }
 
-// room an elision turn needs before pi's auto-compaction would start
 const BX_MARGIN_TOKENS = 8_192
 const DEFAULT_RESERVE_TOKENS = 16_384
 
@@ -113,7 +112,6 @@ const nodeFs: RuntimeFs & PeerFileFs = {
    },
 }
 
-/** The sidecar's ledger lines and recorded elision entries, for a resumed session. */
 function restore(logPath: string) {
    const lines = (nodeFs.readText(logPath) ?? "").split("\n").flatMap((line) => {
       try {
@@ -162,7 +160,7 @@ export default function spiderman(pi: ExtensionAPI): void {
       | undefined
    /** what the /tree guard lets through: our own rewind */
    let treeTarget: string | undefined
-   /** typed in B's pane during an elision turn, which the rewind would discard */
+   /** typed in B's pane during Bx; the rewind would discard it */
    const held: string[] = []
 
    pi.registerCommand(REWIND_COMMAND, {
@@ -340,7 +338,6 @@ export default function spiderman(pi: ExtensionAPI): void {
          log,
          restored: restore(logPath),
          bxDone() {
-            // what the human typed during the elision turn goes in now, as their own turn
             for (const text of held.splice(0)) {
                live().ui.notify(
                   "spiderman: sending what you typed during the elision turn.",

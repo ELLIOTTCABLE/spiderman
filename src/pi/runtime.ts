@@ -52,7 +52,6 @@ export interface RuntimeFs extends StoreFs {
    appendFileSync(path: string, data: string): void
    exists(path: string): boolean
    size(path: string): number | undefined
-   /** what a growing file gained since `offset` bytes */
    readFrom(path: string, offset: number): string | undefined
 }
 
@@ -72,7 +71,6 @@ export interface BSide {
    rewind(entryId: string): Promise<Outcome>
    /** the run still settles */
    abort(): void
-   /** an elision turn here would leave room before pi's auto-compaction */
    bxRoom(): boolean
 }
 
@@ -93,7 +91,6 @@ export interface RuntimeConfig extends TurnConfig {
    readonly chunkDelayMs: number
    /** a B turn that hasn't started by then is treated as a failed start */
    readonly startTimeoutMs: number
-   /** how long B's start waits for CC to write the prompt it answers */
    readonly entryWaitMs: number
    readonly pollMs: number
 }
@@ -111,17 +108,14 @@ export interface RuntimeDeps {
    readonly elision: Elision
    readonly log: (entry: Record<string, unknown>) => void
    readonly config: RuntimeConfig
-   /** rebuilt from the sidecar on resume */
    readonly restored?: {
       readonly ledger: readonly Delivery[]
       readonly never: readonly string[]
    }
-   /** B is free again after an elision turn and its rewind */
    readonly bxDone?: () => void
 }
 
 interface BTurnData {
-   /** B's leaf before this turn's message */
    readonly leaf: string | undefined
    readonly messages?: readonly unknown[]
    readonly outcome?: BOutcome
@@ -154,7 +148,6 @@ export class Runtime {
    readonly #turns = new Map<number, BTurnData>()
    readonly #toA = new Map<number, string[]>()
    readonly #displays = new Map<number, Promise<string[]>>()
-   /** transcript size when each prompt was submitted: CC writes the prompt's entry after it */
    readonly #submitted = new Map<string, number>()
    #ledger: Delivery[]
    readonly #never: Set<string>
@@ -162,7 +155,6 @@ export class Runtime {
    #bRunning: { turn: number; started: boolean; text: string } | undefined
    #bx: BxRun | undefined
    readonly #bxAnswers = new Map<number, Promise<string>>()
-   /** a turn the human started in B's own client, and B's leaf before it */
    #aside: { from: string | undefined } | undefined
    #runKind: { kind: "ours" | "bx" | "aside"; from: string | undefined } | undefined
    #breakerShown = false
@@ -194,7 +186,6 @@ export class Runtime {
       return this.#bx !== undefined
    }
 
-   /** pi's `before_agent_start`: tells our runs from the human's own. */
    bRunStarting(prompt: string): void {
       const from = this.#deps.b.leafId()
       if (this.#bx !== undefined && !this.#bx.started && prompt === this.#bx.text)
@@ -207,7 +198,6 @@ export class Runtime {
       else this.#runKind = { kind: "aside", from }
    }
 
-   /** pi's `agent_start`; a run nobody announced is the human's. */
    bStarted(): void {
       const run = this.#runKind ?? { kind: "aside", from: this.#deps.b.leafId() }
       this.#runKind = undefined
@@ -422,7 +412,6 @@ export class Runtime {
       })
    }
 
-   /** where B's settled record ends: before whatever run is still going */
    #bThrough(): string | null | undefined {
       if (this.#bx !== undefined) return this.#bx.rewindTo
       if (this.#bRunning !== undefined)
@@ -481,7 +470,7 @@ export class Runtime {
       return chunks.map((additionalContext) => ({ additionalContext }))
    }
 
-   /** Re-sends past the budget keep the newest entries; the oldest count as sent, marked once. */
+   /** over budget: newest entries kept, oldest still count as sent; marked once */
    #fitted(
       ids: readonly string[],
       view: SideView,
@@ -700,7 +689,7 @@ export class Runtime {
       )
    }
 
-   /** CC writes a prompt's entry only after its hooks return: wait for it, never guess. */
+   /** CC writes the prompt's entry only after its hooks return: wait, never guess */
    #awaitPrompt(
       path: string,
       promptId: string,

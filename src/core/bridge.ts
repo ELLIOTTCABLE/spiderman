@@ -24,10 +24,6 @@ export function reconcileWithLast(trail: Trail, last: string | undefined): Trail
       : { ...trail, items: [...trail.items, { kind: "text", text: last ?? "" }] }
 }
 
-/**
- * `@path` mentions become plain paths, so B reads the file itself as A does. Only paths that
- * name something under `cwd` change; emails, handles and the like stay as typed.
- */
 export function plainPaths(
    prompt: string,
    cwd: string,

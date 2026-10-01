@@ -11,9 +11,7 @@ export interface CcViewOptions {
    /** the main transcript's own path, to find subagent transcripts beside it */
    readonly transcriptPath?: string
    readonly exists?: (path: string) => boolean
-   /** the live branch runs back from here, e.g. a prompt CC just wrote; default: the newest entry */
    readonly leaf?: string
-   /** a delivered text's carrier hash, to recognise the attachments holding ours */
    readonly carrier?: (text: string) => string
 }
 
@@ -23,7 +21,7 @@ interface Line {
    readonly entry: Entry
 }
 
-// undocumented, version-volatile format (ref-cc-hooks §8): ignore the unknown, report the malformed.
+// undocumented, version-volatile format (ref-cc-hooks §8): ignore the unknown, report the malformed
 // attachments never become items: they include the peer packages this harness injected
 export function ccView(jsonl: string, options: CcViewOptions = {}): SideView {
    const parseIssues: { line: number; issue: string }[] = []
@@ -492,10 +490,6 @@ function contentText(content: unknown): string {
       .join("\n")
 }
 
-/**
- * The user entry CC writes for a submitted prompt, once it has: found in what the transcript
- * gained since the submit, by prompt id or by the prompt's own text.
- */
 export function ccNewPrompt(
    tail: string,
    prompt: string,

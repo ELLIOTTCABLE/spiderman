@@ -16,10 +16,6 @@ import {
 import { sha256Hex } from "./store.ts"
 import type { TrailItem } from "./trail.ts"
 
-// The ledger's coherence scenarios, derived on synthetic trees: each side appends entries under
-// its leaf and rewinds by moving the leaf back. Claude Code writes an edited prompt only after
-// its hooks ran, so its view can lag one write behind the human's rewind: `edit` models that.
-
 interface Node {
    readonly id: string
    readonly parent: string | null
@@ -31,7 +27,6 @@ class Side {
    readonly name: string
    readonly #nodes = new Map<string, Node>()
    leaf: string | null = null
-   /** what a hook sees: the old tail until the next write lands */
    #seen: string | null = null
    #n = 0
 
@@ -65,7 +60,7 @@ class Side {
       this.#seen = to
    }
 
-   /** Esc-Esc in Claude Code: nothing is written until the next prompt */
+   /** Esc-Esc in CC: nothing written until the next prompt */
    edit(to: string | null) {
       this.leaf = to
    }
@@ -101,14 +96,12 @@ const said = (view: SideView, ids: readonly string[]) =>
       .trail(ids)
       .items.map((i) => (i.kind === "prompt" || i.kind === "text" ? i.text : i.kind))
 
-/** Spiderman's moves, as the runtime makes them: deliveries recorded, carriers written. */
 class Pair {
    readonly a = new Side("a")
    readonly b = new Side("b")
    ledger: Delivery[] = []
    #n = 0
 
-   /** A's hook gets B's news first; then CC writes the prompt, and B gets A's news with it. */
    prompt(text: string): { toA: string[]; toB: string[] } {
       const toA = this.#deliver("a", this.b.leaf, { ridesWith: text })
       const before = this.a.leaf
@@ -232,7 +225,6 @@ test("7: B rewound past shared prompts gets A's live items again; A keeps B's st
    pair.a.answer("A3")
    pair.b.answer("B3")
    pair.b.rewind(b1)
-   // A1 rode on the carrier B abandoned
    assert.deepEqual(pair.prompt("U4"), { toA: [], toB: ["A1", "U2", "A2", "U3", "A3"] })
 })
 

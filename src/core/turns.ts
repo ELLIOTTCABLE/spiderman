@@ -77,7 +77,6 @@ export type TurnEvent =
      }
    /** Bx is over, rewound or failed: B is free */
    | { readonly type: "bxDone"; readonly turn: number }
-   /** the human typed in B's own client: B is busy with a turn of its own */
    | { readonly type: "asideStarted" }
    | { readonly type: "asideSettled" }
    /** starting B's turn failed (e.g. compaction in flight, model guard); its prompts go back */
@@ -163,7 +162,6 @@ export interface TurnState {
    readonly pending: readonly Pending[]
    readonly bTurns: readonly BTurn[]
    readonly bRunning: number | undefined
-   /** a turn the human started in B's own client */
    readonly bAside: boolean
    readonly bBlockedUntil: number | undefined
    readonly bFailures: number

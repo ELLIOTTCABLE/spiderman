@@ -9,52 +9,36 @@ import {
    validate,
 } from "./validate.ts"
 
-// Delivery state is derived from both live branches at each event, never kept as cursors, so
-// either side may be rewound freely. A receiver "has" exactly the peer entries carried by
-// deliveries whose chunks sit on its live branch now; the rest of the peer's live record since
-// the pairing began is what it is owed. Nothing here knows which harness a side runs in.
+// state is derived from both live branches at each event, never kept as cursors, so either
+// side can be rewound freely: a receiver "has" the peer entries carried by deliveries whose
+// chunks are on its live branch now
 
-/** One side's record, as its harness adapter presents it. */
 export interface SideView {
-   /** the live branch, oldest first */
    readonly live: readonly ViewEntry[]
    /** any entry's parent, live or abandoned: null at a root, undefined for an unknown entry */
    parent(id: string): string | null | undefined
-   /** the trail of exactly these live entries, in branch order */
    trail(ids: readonly string[]): Trail
 }
 
 export interface ViewEntry {
    readonly id: string
-   /** adds to a trail */
    readonly content: boolean
-   /** a human prompt, or one of our deliveries, starts a turn here */
    readonly startsTurn: boolean
-   /** a human prompt's text */
    readonly prompt?: string
-   /** an answer's text */
    readonly text?: string
-   /** carrier hashes of delivered texts this entry holds */
    readonly carries: readonly string[]
 }
 
 export interface Delivery {
    readonly id: string
-   /** the receiving side's name */
    readonly to: string
-   /** carrier hash of each chunk handed to the receiver's harness */
    readonly chunks: readonly string[]
-   /** peer entries carried: had only while every chunk is on the receiver's live branch */
    readonly ids: readonly string[]
-   /** peer content carried before the peer's record held it: the first entries after `ids` that match */
+   /** content carried before the peer's record held it, matched to the first entries after `ids` */
    readonly ahead: readonly Anchor[]
-   /** the human messages it carried */
    readonly prompts: readonly string[]
-   /** the receiver's newest entry when sent */
    readonly sentAfter?: string
-   /** the receiver's own prompt this rode with: its entry appearing without the chunks means failure */
    readonly ridesWith?: string
-   /** on a side's first delivery: where the pairing began in the peer's record; null: its start */
    readonly floor?: string | null
 }
 
@@ -64,7 +48,6 @@ export type Ledger = readonly Delivery[]
 
 export type Status = "had" | "pending" | "failed" | "gone"
 
-/** Matching survives line-ending and trailing-space drift between what we sent and what was kept. */
 export function carrierHash(hash: (text: string) => string, text: string): string {
    return hash(text.replace(/\r\n?/g, "\n").trimEnd())
 }
@@ -73,7 +56,6 @@ export function status(delivery: Delivery, receiver: SideView): Status {
    const held = (h: string) => receiver.live.some((e) => e.carries.includes(h))
    if (delivery.chunks.length > 0 && delivery.chunks.every(held)) return "had"
    if (delivery.chunks.some(held)) return "failed"
-   // written along with the send itself, so not there means not held
    const prompt = delivery.ridesWith
    if (prompt === undefined) return "gone"
    const at =
@@ -81,13 +63,12 @@ export function status(delivery: Delivery, receiver: SideView): Status {
          ? -1
          : receiver.live.findIndex((e) => e.id === delivery.sentAfter)
    if (delivery.sentAfter !== undefined && at === -1) return "gone"
-   // the receiver writes it with the prompt it rode on; the next prompt shows whether it did
+   // lands with the prompt it rode on, so the next prompt entry shows whether it did
    const next = receiver.live.slice(at + 1).find((e) => e.prompt !== undefined)
    if (next === undefined) return "pending"
    return same(next.prompt, prompt) ? "failed" : "gone"
 }
 
-/** The peer entries the receiver holds now, pending deliveries included. */
 export function have(
    ledger: Ledger,
    to: string,
@@ -126,16 +107,10 @@ function same(a: string | undefined, b: string): boolean {
 }
 
 export interface Owed {
-   /** peer entries to send, oldest first */
    readonly ids: readonly string[]
-   /** set on a side's first delivery, for the record */
    readonly floor?: string | null
 }
 
-/**
- * The delivery rule: the peer's live entries with content after the pairing floor, up to and
- * including `through` (null: nothing yet), that the receiver doesn't have.
- */
 export function owed(
    ledger: Ledger,
    to: string,
@@ -162,7 +137,6 @@ export function owed(
    return recorded === undefined ? { ids, floor } : { ids }
 }
 
-/** The entry itself if live, else where the peer's live branch forked from it. */
 function clipped(id: string | null, peer: SideView): string | null | "unknown" {
    const live = new Set(peer.live.map((e) => e.id))
    for (let at: string | null | undefined = id; ; at = peer.parent(at)) {
@@ -171,10 +145,6 @@ function clipped(id: string | null, peer: SideView): string | null | "unknown" {
    }
 }
 
-/**
- * Where a side's first delivery starts: just before the peer's first delivery from it, else
- * (a new pairing) at the peer's last turn up to `end`.
- */
 function firstFloor(
    ledger: Ledger,
    to: string,
@@ -193,13 +163,11 @@ function position(view: SideView, id: string): number {
    return view.live.findIndex((e) => e.id === id)
 }
 
-/** The last three deliveries to a side all failed: matching itself is broken, so stop re-sending. */
+/** three straight failures: matching itself is broken, so stop re-sending */
 export function matchBroken(ledger: Ledger, to: string, receiver: SideView): boolean {
    const recent = ledger.filter((d) => d.to === to).slice(-3)
    return recent.length === 3 && recent.every((d) => status(d, receiver) === "failed")
 }
-
-// the sidecar holds the ledger as append-only lines, so a resumed session rebuilds it
 
 const anchor: Validator<Anchor> = (input, at) =>
    isRecord(input) && typeof input.prompt === "string"

@@ -11,7 +11,6 @@ import { piTrail } from "./pi-trail.ts"
 const fixturePath = (name: string) =>
    fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
 const fixture = (name: string) => readFileSync(fixturePath(name), "utf8")
-// the injected user turn is ours: a session view leaves it out the same way
 const piMessages = (jsonl: string) =>
    jsonl
       .split("\n")
@@ -20,7 +19,6 @@ const piMessages = (jsonl: string) =>
       .filter((entry) => entry.type === "message" && entry.message.role !== "user")
       .map((entry) => entry.message)
 
-/** A's live trail after the prompt with this id. */
 function ccTrailAfter(jsonl: string, promptId: string, options: CcViewOptions = {}) {
    const prompt = jsonl
       .split("\n")

@@ -56,7 +56,6 @@ function jsonl(...entries: object[]): string {
 
 type At = { readonly promptId: string } | { readonly uuid: string }
 
-/** The live trail after one entry and before another, named the way these tests name them. */
 function ccTrail(
    text: string,
    span: { after?: At; until?: At } = {},

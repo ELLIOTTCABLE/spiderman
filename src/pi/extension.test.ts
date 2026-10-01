@@ -131,7 +131,6 @@ async function post(cwd: string, body: unknown): Promise<HookReply> {
       body: JSON.stringify(body),
    })
    const reply = (await res.json()) as HookReply
-   // Claude Code writes the prompt's entry only once its hooks have answered
    if (isRecord(body) && body.kind === "prompt")
       appendFileSync(
          String(body.transcriptPath),

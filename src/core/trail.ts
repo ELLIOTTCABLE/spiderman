@@ -4,14 +4,12 @@ export type TrailItem =
    | {
         readonly kind: "prompt"
         readonly text: string
-        /** typed in this side's own client, not shared with the peer */
         readonly direct?: true
      }
    /** where an answer to shared human messages starts */
    | {
         readonly kind: "turn"
         readonly prompts: readonly string[]
-        /** the receiver lacks these messages now, so they come with the answer */
         readonly asked?: true
      }
    | { readonly kind: "text"; readonly text: string }

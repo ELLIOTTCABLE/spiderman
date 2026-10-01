@@ -24,7 +24,6 @@ export function mediatorInput(aText: string, bText: string): string {
 
 const INDEX_WORDS = 6
 
-/** opens every Bx prompt, so a session's record can tell the exchange apart from the human's */
 export const BX_MARK = "[elision request from the harness, not from the human."
 
 // B has its own answer in context already, so an index of it suffices

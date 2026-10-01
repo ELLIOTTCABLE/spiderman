@@ -42,13 +42,11 @@ function harness(
       size: (path) => files.get(path)?.length,
       readFrom: (path, offset) => files.get(path)?.slice(offset),
    }
-   // B's session: a branch of pi entries, rewound by cutting it back
    let branch: { type: string; id: string; message: unknown }[] = []
    let ids = 0
    const push = (message: unknown) =>
       branch.push({ type: "message", id: `b${++ids}`, message })
    const sent: string[] = []
-   /** sends, rewinds and aborts, in the order B saw them */
    const seen: string[] = []
    const logs: Record<string, unknown>[] = []
    let refusals = options.refuse ?? 0
@@ -133,7 +131,6 @@ function harness(
          "t.jsonl",
          `${(files.get("t.jsonl") ?? "") + entries.map((e) => JSON.stringify(e)).join("\n")}\n`,
       )
-   /** B's run starting, as pi announces it */
    const start = (text = sent.at(-1) ?? "") => {
       runtime.bRunStarting(text)
       runtime.bStarted()
@@ -145,13 +142,11 @@ function harness(
          stopReason: "stop",
          ...(usage === undefined ? {} : { usage }),
       })
-   /** The human typing in B's own pane: pi announces the run, then appends the message */
    const pane = (text: string) => {
       runtime.bRunStarting(text)
       push({ role: "user", content: [{ type: "text", text }] })
       runtime.bStarted()
    }
-   /** The human's prompt: the hook asks, then CC writes the entry, then B may start. */
    const submit = async (text: string, promptId: string) => {
       const reply = runtime.handle(prompt(text, promptId))
       transcript(userEntry(text, promptId))
@@ -322,7 +317,6 @@ const bx = { strategy: "bx" } as const
 const logged = (logs: Record<string, unknown>[], what: string) =>
    logs.flatMap(({ what: w, at: _at, ...rest }) => (w === what ? [rest] : []))
 
-/** B answered U1, A stopped, and U2 came in: the display waits on B's elision turn. */
 async function elisionPending(h: ReturnType<typeof harness>) {
    await h.submit("U1", "p1")
    h.start()

@@ -61,7 +61,6 @@ test("a user message is the human typing to this side directly", () => {
    assert.deepEqual(trail.items, [{ kind: "prompt", text: "why?", direct: true }])
 })
 
-// a branch as pi's getBranch() returns it
 let ids = 0
 const entry = (message: unknown) => ({ type: "message", id: `e${++ids}`, message })
 const user = (text: string) => entry({ role: "user", content: [{ type: "text", text }] })
