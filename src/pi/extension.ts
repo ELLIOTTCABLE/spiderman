@@ -17,7 +17,7 @@ import {
    MEDIATOR_SYSTEM_PROMPT,
    mediatorInput,
 } from "../core/elision.ts"
-import { piView } from "../core/pi-trail.ts"
+import { messageText, piView } from "../core/pi-trail.ts"
 import { STATE_DIR } from "../core/protocol.ts"
 import { STANDING_FOR_B } from "../core/standing.ts"
 import { sha256Hex } from "../core/store.ts"
@@ -160,6 +160,8 @@ export default function spiderman(pi: ExtensionAPI): void {
       | undefined
    /** what the /tree guard lets through: our own rewind */
    let treeTarget: string | undefined
+   /** the human's /tree pick; `session_tree` doesn't name it */
+   let humanTreeTarget: string | undefined
    /** typed in B's pane during Bx; the rewind would discard it */
    const held: string[] = []
 
@@ -390,17 +392,31 @@ export default function spiderman(pi: ExtensionAPI): void {
    })
    pi.on("session_before_tree", (event, ctx) => {
       if (treeTarget !== undefined && event.preparation.targetId === treeTarget) return
-      if (!session?.runtime.bxInFlight()) return
+      if (!session?.runtime.bxInFlight()) {
+         humanTreeTarget = event.preparation.targetId
+         return
+      }
       ctx.ui.notify(
          "spiderman: B is eliding its last answer; try /tree again in a moment.",
          "warning",
       )
       return { cancel: true }
    })
-   // pi keeps the leaf in memory only: an entry on the new branch makes a restart resume there
-   pi.on("session_tree", (event) => {
+   pi.on("session_tree", (event, ctx) => {
       if (treeTarget !== undefined) return
+      // pi keeps the leaf in memory only: an entry on the new branch makes a restart resume there
       pi.appendEntry(TREE_ENTRY, { from: event.oldLeafId, to: event.newLeafId })
+      const target =
+         humanTreeTarget === undefined
+            ? undefined
+            : ctx.sessionManager.getEntry(humanTreeTarget)
+      humanTreeTarget = undefined
+      if (target?.type !== "message" || target.message.role !== "user") return
+      const prompts = session?.runtime.carriedPrompts(messageText(target.message.content))
+      const prompt = prompts?.join("\n\n") ?? ""
+      // after this, pi fills a blank editor with the carrier's whole text; a non-blank one it leaves
+      if (prompt.trim() !== "" && ctx.ui.getEditorText().trim() === "")
+         ctx.ui.setEditorText(prompt)
    })
    pi.on("agent_start", (_event, ctx) => {
       if (session !== undefined) session.ctx = ctx

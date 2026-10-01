@@ -145,7 +145,7 @@ function sessionMessage(
    return undefined
 }
 
-function messageText(content: unknown): string {
+export function messageText(content: unknown): string {
    if (typeof content === "string") return content
    return Array.isArray(content)
       ? content

@@ -33,7 +33,10 @@ function fakePi(
       customType?: string
       data?: unknown
    }[] = []
+   /** pi's tree keeps what a /tree leaves behind */
+   const offBranch: typeof branch = []
    const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>()
+   const editor = { text: "" }
    const ctx = {
       cwd,
       model: { provider, id: "gpt-6-astra" },
@@ -58,13 +61,19 @@ function fakePi(
       isIdle: () => true,
       abort: () => {},
       getContextUsage: () => undefined,
-      ui: { notify: (message: string) => void notices.push(message) },
+      ui: {
+         notify: (message: string) => void notices.push(message),
+         getEditorText: () => editor.text,
+         setEditorText: (text: string) => {
+            editor.text = text
+         },
+      },
       sessionManager: {
          getSessionFile: () => undefined,
          getSessionId: () => "pi-session",
          getLeafId: () => branch.at(-1)?.id ?? null,
          getLeafEntry: () => branch.at(-1),
-         getEntry: (id: string) => branch.find((e) => e.id === id),
+         getEntry: (id: string) => [...branch, ...offBranch].find((e) => e.id === id),
          getBranch: () => branch,
       },
    }
@@ -105,7 +114,23 @@ function fakePi(
    const emit = (event: string, payload: unknown = {}) =>
       handlers.get(event)?.(payload, ctx)
    const command = (name: string, args: string) => commands.get(name)?.(args, commandCtx)
-   return { emit, sent, notices, branch, elisions, command }
+   /** the human's /tree onto a user message, as pi's interactive mode runs it */
+   const humanTree = (targetId: string) => {
+      const at = branch.findIndex((e) => e.id === targetId)
+      const target = branch[at]
+      assert.ok(target !== undefined, `${targetId} is not on the branch`)
+      const { content } = target.message as { content: { text: string }[] }
+      const oldLeafId = branch.at(-1)?.id ?? null
+      const verdict = emit("session_before_tree", { preparation: { targetId } }) as
+         | { cancel?: boolean }
+         | undefined
+      if (verdict?.cancel) return
+      offBranch.push(...branch.splice(at))
+      emit("session_tree", { oldLeafId, newLeafId: branch.at(-1)?.id ?? null })
+      const editorText = content.map((b) => b.text).join("\n")
+      if (editorText !== "" && editor.text.trim() === "") editor.text = editorText
+   }
+   return { emit, sent, notices, branch, elisions, command, editor, humanTree }
 }
 
 async function until(condition: () => boolean) {
@@ -243,6 +268,55 @@ test("/tree in B's pane is the human's, and pinned so a restart resumes where th
    )
    pi.emit("session_tree", { oldLeafId: "b9", newLeafId: "b2" })
    assert.deepEqual(pi.branch.at(-1)?.data, { from: "b9", to: "b2" })
+})
+
+test("/tree onto a message spiderman sent B puts only the human's prompt in the editor", async () => {
+   const cwd = mkdtempSync(join(tmpdir(), "spiderman-ext-"))
+   const pi = fakePi(cwd)
+   const user = (id: string, text: string) => ({
+      type: "message",
+      id,
+      message: { role: "user", content: [{ type: "text", text }] },
+   })
+   try {
+      await pi.emit("session_start", { reason: "startup" })
+      const common = { ccSessionId: "cc", transcriptPath: join(cwd, "a.jsonl"), cwd }
+      await post(cwd, {
+         kind: "prompt",
+         prompt: "U1",
+         promptId: "p1",
+         part: { index: 1, count: 1 },
+         ...common,
+      })
+      await until(() => pi.sent.length === 1)
+      const carrier = pi.sent[0] ?? ""
+      assert.equal(carrier, "[the human's message]\nU1")
+      pi.emit("before_agent_start", { prompt: carrier, systemPrompt: "" })
+      pi.emit("agent_start")
+      pi.branch.push(user("u1", carrier), assistant("m1", "B's answer."))
+      pi.emit("agent_settled")
+
+      pi.editor.text = "a draft"
+      pi.humanTree("u1")
+      assert.equal(pi.editor.text, "a draft", "pi keeps a draft; so do we")
+
+      pi.branch.push(user("u1", carrier), assistant("m1", "B's answer."))
+      pi.editor.text = ""
+      pi.humanTree("u1")
+      assert.equal(pi.editor.text, "U1")
+
+      pi.branch.push(user("d1", "[the human's message]\nwhy?"))
+      pi.editor.text = ""
+      pi.humanTree("d1")
+      assert.equal(
+         pi.editor.text,
+         "[the human's message]\nwhy?",
+         "the human's own pane message is theirs, verbatim",
+      )
+   } finally {
+      await pi.emit("session_shutdown", { reason: "quit" })
+      rmSync(cwd, { recursive: true, force: true })
+   }
 })
 
 async function displayedTurn(pi: ReturnType<typeof fakePi>, cwd: string) {
