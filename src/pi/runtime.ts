@@ -272,7 +272,10 @@ export class Runtime {
       const cached = this.#deliveries.get(key)
       if (cached !== undefined) return cached
       const messages = turns.flatMap((t) => this.#turns.get(t)?.messages ?? [])
-      const pkg = formatPeerPackage(piTrail(messages), this.#packageEnv())
+      const trail = piTrail(messages)
+      // an empty peer block still costs A tokens on every later request
+      if (trail.items.length === 0 && trail.issues.length === 0) return []
+      const pkg = formatPeerPackage(trail, this.#packageEnv())
       const fullPath = this.#writeState(
          `turns/b-${turns.join("-")}.package.md`,
          packageText(pkg),
