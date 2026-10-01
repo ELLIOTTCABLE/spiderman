@@ -56,6 +56,7 @@ test("other write failures propagate", () => {
       writeFileSync() {
          throw Object.assign(new Error("EACCES"), { code: "EACCES" })
       },
+      readText: () => undefined,
    }
    const store = peerStore("root", fs, fakeHash)
    assert.throws(() => store.put("x"), /EACCES/)
