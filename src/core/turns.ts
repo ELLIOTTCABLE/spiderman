@@ -354,7 +354,6 @@ class Machine {
       }
    }
 
-   /** Answers every group whose wait is over: its B turn settled, or its deadline passed. */
    settleGroups() {
       for (const group of this.state.groups) {
          if (group.answer !== undefined || group.waitFor === undefined) continue

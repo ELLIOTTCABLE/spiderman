@@ -4,7 +4,6 @@ import type { Segment } from "./package.ts"
 import type { Trail } from "./trail.ts"
 import { isRecord } from "./validate.ts"
 
-/** B's user message: A's package (if any), then each pending human message in order. */
 export function bMessage(
    aPackage: string | undefined,
    prompts: readonly string[],
@@ -75,7 +74,6 @@ export function bOutcome(
    return reason === "error" ? "error" : reason === "aborted" ? "aborted" : "completed"
 }
 
-/** The elided B answer as `systemMessage` strings, each under CC's 10k cap. */
 export function displayChunks(
    rendered: string,
    options: {

@@ -37,7 +37,6 @@ export interface RuntimeFs extends StoreFs {
    exists(path: string): boolean
 }
 
-/** What the runtime needs from B's session; the extension adapts pi to it. */
 export interface BSide {
    /** refuses (busy, compacting, model not allowed) rather than throwing */
    send(text: string): { ok: true } | { ok: false; reason: string }
