@@ -50,6 +50,8 @@ export interface PackageEnv {
    readonly refer: (text: string) => string
    /** a file's current text, or undefined; relative paths resolve against the peer's cwd */
    readonly readFile: (path: string) => string | undefined
+   /** both peers' working directory; paths under it are shown relative to it */
+   readonly cwd?: string
 }
 
 // facts, not imperatives: out-of-band commands trip CC's prompt-injection defences
@@ -228,7 +230,7 @@ function renderRead(
 ): Rendered | undefined {
    const path = inputPath(call.input)
    if (path === undefined || view === undefined) return undefined
-   const head = `[tool] read ${path}`
+   const head = `[tool] read ${relativeToCwd(env, path)}`
    if (result === undefined) return tool(`${head} → no result recorded`, [])
    if (result.isError) {
       const error = errorPhrase(result, env)
@@ -306,7 +308,7 @@ function renderEdit(
       (call.input as Record<string, unknown>).replace_all === true
          ? " (all occurrences)"
          : ""
-   const head = `[tool] edit ${path}${all}`
+   const head = `[tool] edit ${relativeToCwd(env, path)}${all}`
    if (result?.isError) {
       const error = errorPhrase(result, env)
       return tool(`${head}${error.text} (attempted diff: ${diffRef})`, [
@@ -337,12 +339,12 @@ function renderWrite(
    if (result?.isError) {
       const error = errorPhrase(result, env)
       const ref = env.refer(content)
-      return tool(`[tool] write ${path}${error.text} (content: ${ref})`, [
-         ...error.pointers,
-         ref,
-      ])
+      return tool(
+         `[tool] write ${relativeToCwd(env, path)}${error.text} (content: ${ref})`,
+         [...error.pointers, ref],
+      )
    }
-   const head = `[tool] wrote ${path} (${plural(lineCount(content), "line")}`
+   const head = `[tool] wrote ${relativeToCwd(env, path)} (${plural(lineCount(content), "line")}`
    const status = result === undefined ? " → no result recorded" : ""
    const current = env.readFile(path)
    const unchanged = current !== undefined && normalise(current) === normalise(content)
@@ -371,7 +373,7 @@ function renderSubagent(
    }
    if (result?.transcript !== undefined) {
       pointers.push(result.transcript)
-      head += ` (transcript: ${result.transcript})`
+      head += ` (transcript: ${relativeToCwd(env, result.transcript)})`
    }
    if (result === undefined) return tool(`${head} → no result recorded`, pointers)
    if (result.background === true)
@@ -402,7 +404,7 @@ function renderReport(
       notes.push(report.status)
    const pointers: string[] = []
    if (report.transcript !== undefined) {
-      notes.push(`transcript: ${report.transcript}`)
+      notes.push(`transcript: ${relativeToCwd(env, report.transcript)}`)
       pointers.push(report.transcript)
    }
    const label = who === undefined ? "" : `: ${clip(who, BRIEF_LIMIT)}`
@@ -463,6 +465,18 @@ function renderMessage(
    return tool(text, pointers)
 }
 
+const PATH_KEYS: ReadonlySet<string> = new Set(["path", "file_path"])
+
+// both peers share the cwd; drive-letter paths compare case-insensitively, as Windows does
+function relativeToCwd(env: PackageEnv, path: string): string {
+   if (env.cwd === undefined) return path
+   const base = env.cwd.replaceAll("\\", "/").replace(/\/+$/, "")
+   const fold = (p: string) => (/^[a-z]:/i.test(p) ? p.toLowerCase() : p)
+   const candidate = fold(path.replaceAll("\\", "/"))
+   if (candidate === fold(base)) return "."
+   return candidate.startsWith(`${fold(base)}/`) ? path.slice(base.length + 1) : path
+}
+
 function tool(text: string, pointers: readonly string[]): Rendered {
    return { segments: [{ kind: "tool", text }], pointers }
 }
@@ -473,8 +487,12 @@ interface Phrase {
 }
 
 function inputPhrase(input: unknown, limit: number, env: PackageEnv): Phrase {
-   const json = JSON.stringify(input ?? {}, (_key, value) =>
-      value === null ? undefined : value,
+   const json = JSON.stringify(input ?? {}, (key, value) =>
+      value === null
+         ? undefined
+         : PATH_KEYS.has(key) && typeof value === "string"
+           ? relativeToCwd(env, value)
+           : value,
    )
    if (json.length <= limit) return { text: ` ${json}`, pointers: [] }
    const ref = env.refer(JSON.stringify(input, null, 2))
@@ -493,7 +511,7 @@ function outputPhrase(
    if (result.saved !== undefined) {
       const size = result.saved.size === undefined ? "" : `${result.saved.size}, `
       return {
-         text: ` → ${size}saved at ${result.saved.path}`,
+         text: ` → ${size}saved at ${relativeToCwd(env, result.saved.path)}`,
          pointers: [result.saved.path],
       }
    }
@@ -519,7 +537,10 @@ function errorPhrase(result: TrailResult, env: PackageEnv): Phrase {
    const first = clip(result.text.split("\n")[0] ?? "", BRIEF_LIMIT)
    if (first === result.text.trim()) return { text: ` → error: ${first}`, pointers: [] }
    const ref = result.saved?.path ?? env.refer(result.text)
-   return { text: ` → error: ${first} (full: ${ref})`, pointers: [ref] }
+   return {
+      text: ` → error: ${first} (full: ${relativeToCwd(env, ref)})`,
+      pointers: [ref],
+   }
 }
 
 interface Seen {

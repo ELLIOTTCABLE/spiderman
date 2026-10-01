@@ -573,3 +573,28 @@ test("a view already given in an earlier package is not repeated; a changed one 
    const changed = formatPeerPackage(read("r3", ["one", "TWO", ""]), env, again.memory)
    assert.match(packageText(changed), /\[tool\] read a\.md L1–3 \(file changed since/)
 })
+
+test("paths under the shared cwd are shown relative to it; others stay absolute", () => {
+   const { env } = fakeEnv({ "C:\\proj\\specs\\a.md": "one\ntwo" })
+   const t = trail(
+      call("r", "Read", { file_path: "C:\\proj\\specs\\a.md" }),
+      ok("r", numbered(1, ["one", "two"])),
+      call("g", "Grep", { pattern: "x", path: "c:/PROJ" }),
+      ok("g", ""),
+      call("b", "Bash", { command: "seq 9999" }),
+      {
+         kind: "result",
+         id: "b",
+         text: "<persisted-output>…",
+         isError: false,
+         saved: { path: "C:\\Users\\u\\.claude\\tool-results\\b.txt" },
+      },
+   )
+   const pkg = formatPeerPackage(t, { ...env, cwd: "C:\\proj\\" })
+   assert.deepEqual(packageText(pkg).split("\n\n").slice(1, -1), [
+      "[tool] read specs\\a.md L1–2",
+      '[tool] Grep {"pattern":"x","path":"."} → no output',
+      '[tool] Bash {"command":"seq 9999"} → saved at C:\\Users\\u\\.claude\\tool-results\\b.txt',
+   ])
+   assert.deepEqual(pkg.interactions[0]?.pointers, ["C:\\proj\\specs\\a.md"])
+})
