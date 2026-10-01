@@ -1,5 +1,7 @@
 # spiderman
 
+> llm slop. don't use this if you're in your right mind. I won't be maintaining this unless I end up using it much, and in that case it may be rebuilt from scratch to be less jank.
+
 You talk to Claude in Claude Code (A). A second model in pi (B) answers every prompt in parallel. Each model gets the other's previous answer with your next prompt, and under each of A's answers you see B's answer, with the paragraphs that only repeat A collapsed to one line each, quoting their first words: `[elided: "first eight words…"]`. A model picks those paragraphs by number (see `--spiderman-strategy`); a paragraph with a number or code that A's answer lacks is never collapsed, whatever it picks.
 
 Experimental. The plumbing is meant to be careful; the surface is rough.
