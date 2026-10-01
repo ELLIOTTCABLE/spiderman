@@ -65,7 +65,8 @@ const TINY_LINES = 5
 const TINY_CHARS = 240
 const INLINE_INPUT_LIMIT = 1_000
 const GENERIC_INPUT_LIMIT = 300
-const INLINE_DIFF_LIMIT = 2_000
+const INLINE_DIFF_LIMIT = 1_500
+const DIFF_BUDGET = 8_000
 const BRIEF_LIMIT = 160
 const REPORT_LIMIT = 1_500
 // bounds a long session's memory; older reads are simply shown again
@@ -146,7 +147,24 @@ export function formatPeerPackage(
       }
    }
    segments.push({ kind: "frame", text: CLOSING })
-   return { segments, interactions, memory: reads.memory() }
+   return { segments: withinDiffBudget(segments), interactions, memory: reads.memory() }
+}
+
+// past the budget, the largest inline diffs become refs (lossless)
+function withinDiffBudget(segments: readonly Segment[]): Segment[] {
+   const diffs = segments
+      .flatMap((s, i) => (s.kind === "tool" && s.compact !== undefined ? [i] : []))
+      .sort((a, b) => (segments[b]?.text.length ?? 0) - (segments[a]?.text.length ?? 0))
+   let total = diffs.reduce((n, i) => n + (segments[i]?.text.length ?? 0), 0)
+   const compacted = new Set<number>()
+   for (const i of diffs) {
+      if (total <= DIFF_BUDGET) break
+      total -= segments[i]?.text.length ?? 0
+      compacted.add(i)
+   }
+   return segments.map((s, i) =>
+      compacted.has(i) && s.compact !== undefined ? { kind: s.kind, text: s.compact } : s,
+   )
 }
 
 export function packageText(pkg: PeerPackage): string {
@@ -297,7 +315,7 @@ function renderEdit(
       ])
    }
    const status = result === undefined ? " → no result recorded" : ""
-   const compact = `${head} → diff ${diffRef} (${plural(lineCount(diff), "line")})${status}`
+   const compact = `${head} (${changedLines(hunks)}) → diff ${diffRef}${status}`
    if (diff.length > INLINE_DIFF_LIMIT) return tool(compact, [diffRef])
    return {
       segments: [
@@ -586,6 +604,12 @@ function diffLines(hunks: readonly Hunk[]): string {
          return [...removed, ...added].join("\n")
       })
       .join("\n@@\n")
+}
+
+function changedLines(hunks: readonly Hunk[]): string {
+   const added = hunks.reduce((n, h) => n + lineCount(h.new), 0)
+   const removed = hunks.reduce((n, h) => n + lineCount(h.old), 0)
+   return `+${added}/−${removed} lines`
 }
 
 function fenced(text: string, info: string): string {

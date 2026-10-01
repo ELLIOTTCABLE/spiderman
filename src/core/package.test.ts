@@ -253,13 +253,38 @@ test("a failed edit is a marker with the attempted diff by reference", () => {
    assert.equal(stored.get("peer/1.txt"), "-x\n+y")
 })
 
-test("an oversized edit is referenced instead of inlined", () => {
-   const old = "z\n".repeat(1500)
+test("an edit over the inline cap is its line counts and a stored diff", () => {
    const t = trail(
-      call("e", "Edit", { file_path: "a", old_string: old, new_string: "" }),
+      call("e", "Edit", {
+         file_path: "a.md",
+         old_string: "old line\n".repeat(100),
+         new_string: "new line\n".repeat(80),
+      }),
       ok("e", ""),
    )
-   assert.deepEqual(body(t), ["[tool] edit a → diff peer/1.txt (1501 lines)"])
+   assert.deepEqual(body(t), ["[tool] edit a.md (+80/−100 lines) → diff peer/1.txt"])
+})
+
+test("many mid-size edits stay within a budget: the largest become stored diffs first", () => {
+   const { env, stored } = fakeEnv()
+   const edits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].flatMap((n): TrailItem[] => [
+      call(`e${n}`, "Edit", {
+         file_path: `n${n}.md`,
+         old_string: "x".repeat(600 + n * 50),
+         new_string: "y",
+      }),
+      ok(`e${n}`, ""),
+   ])
+   const pkg = formatPeerPackage(trail(...edits), env)
+   const inline = pkg.segments.filter((s) => s.text.includes("```diff"))
+   const inlineChars = inline.reduce((n, s) => n + s.text.length, 0)
+   assert.ok(inline.length > 0 && inline.length < 10, `${inline.length} inline`)
+   assert.ok(inlineChars <= 8_000, `${inlineChars} chars inline`)
+   assert.ok(
+      inline.every((s) => !s.text.includes("n10.md")),
+      "the largest went first",
+   )
+   assert.equal(stored.size, 10, "every diff is stored, inline or not")
 })
 
 test("a write is path and line count; the content is stored only if the file changed since", () => {
