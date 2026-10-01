@@ -165,16 +165,34 @@ human reads A_N + elided B_N, types U_{N+1}
   - A: `hook_additional_context` attachments, children of the prompt's user entry on CC's parent chain.
   - B: the user message we inject.
   - A rewind therefore drops the received peer content along with everything else.
-- **Derived state, not cursors.** At every event, spiderman derives the delivery state from both live branches (CC parent chain; pi `getBranch()`).
-- **Ledger.** One record per delivery:
-  - the direction;
-  - the receiver entry that carries it, identified afterwards by matching the exact sent text, so no tag tokens are needed;
-  - the last peer entry it covered.
-- **Sync point(X):** the newest peer entry covered by a delivery that is still on X's live branch, clipped to the fork point if the peer has since abandoned that entry.
-- **Delivery rule:** each delivery to X carries the peer's live-branch items after sync(X). Nothing else, and no "withdrawn" text.
-  - Receiver rewinds re-send exactly what X lost.
-  - Peer rewinds stop at the fork, so abandoned peer turns are never sent.
-  - Stale knowledge (peer content X saw that the peer later abandoned) is accepted silently.
+- **Derived state, not cursors** (`src/core/coherence.ts`). At every event, delivery state is derived from both live branches.
+  - Adapters `ccView` and `piView` supply each side's live chain.
+  - `ccView` walks `parentUuid ?? logicalParentUuid`, and finds our carriers by attachment hash (CRLF normalised to LF, trailing whitespace trimmed).
+  - `piView` comes from `getBranch()`: carriers become turn markers, Bx entries are never deliverable, and pane messages are direct prompts.
+- **Ledger:** append-only sidecar lines `delivered`, `lost` and `never`, so it rebuilds after a pi resume.
+  - Each delivery records the exact *set* of peer item ids it carried, and its carrier: the receiver entry, or the hash of each chunk we sent.
+- **Delivery status:**
+  - `had`: all its chunks are on the receiver's live chain.
+  - `pending`: a submit-time delivery whose prompt entry isn't written yet; it counts as had.
+  - `failed`: the paired prompt entry appeared without our attachments.
+  - `gone`: the carrier is off the live chain.
+  - Deliveries to B are never pending.
+- **`owed(X)`:** the peer's live items after the pairing floor and before the current prompt (the upper bound), minus the ids X has. They are sent in order, with no "withdrawn" text.
+  - Receiver rewinds re-send what X lost, healing at the next prompt even when CC's transcript lags at submit.
+  - Peer rewinds never send abandoned turns.
+  - Stale knowledge is accepted silently.
+  - A carrier to B also covers the A-side id of the prompt it carried, so B has it.
+  - A B answer reaches A together with its question iff A's live chain lacks that prompt (matched by text).
+  - Exactly-once for A's Stop-lag final text comes from `ahead` anchors.
+- **Bounds:**
+  - If owed exceeds the package budget, the oldest quarters are dropped, recorded as sent, and marked with one `[earlier peer history omitted]` line.
+  - Partial chunk delivery means the whole delivery isn't had, so it duplicates rather than loses.
+- **Match breaker** (deliveries to A only): when recent deliveries all go unmatched while their prompts are present, re-sending stops, `match-broken` is logged, and a notice is shown.
+- **B-side rules:**
+  - Pane turns make B busy (tracked from all runs).
+  - Pane input during Bx is held and resubmitted after the rewind.
+  - The human's `/tree` is allowed, and pinned with a context-excluded entry so a restart keeps it; it is cancelled only during Bx.
+  - Bx is skipped (B shown in full, flagged) within ~8K tokens of pi's compaction threshold.
 - **Invariants:**
   - each context only appends or moves its leaf back, so the cache prefix is never edited;
   - deliveries ride only on human-caused turns, and leaf moves are not model requests;
@@ -183,13 +201,13 @@ human reads A_N + elided B_N, types U_{N+1}
 
 | # | Human does | spiderman | Coherence | Cost |
 |---|---|---|---|---|
-| 1 | normal prompt in A | B: A-items after sync + prompt; A: B-items after sync | full | 0 extra |
+| 1 | normal prompt in A | B: owed A items + prompt; A: owed B items | full | 0 extra |
 | 2 | `~` aside in A | A-only turn; reaches B as trail at the next shared prompt if still live | full | 0 |
 | 3 | types in B's pane | B-only turn; reaches A as trail ("the human asked the peer directly…") at A's next prompt if still live | full | 0 |
 | 4 | rewinds A past an aside | local; never sent if not yet delivered | small hole | 0 |
 | 5 | rewinds or edits A past a shared prompt | no follow (human choice). B keeps its old exchange and gets the edited prompt as a normal turn. Future option `follow`: move B's leaf to before the carrier (abort if running), with no follow on an identical resubmit | small hole (follow: full) | 0 |
 | 6 | chats in B, then `/tree` back (debug flow) | local; the abandoned debug exchange never reaches A | full | 0 |
-| 7 | `/tree` in B past shared prompts | local. The next A prompt re-sends A's live items after B's new sync; A keeps B's abandoned answers as stale history | B full, A small hole | 0 extra, one larger package |
+| 7 | `/tree` in B past shared prompts | local. The next A prompt re-sends the A items B no longer has; A keeps B's abandoned answers as stale history | B full, A small hole | 0 extra, one larger package |
 | 8 | Bx elision turn | internal B aside, rewound; carries no deliveries | full | accepted Bx cost |
 | 9 | pi restart | new pairing, last-turn backlog | acceptable | 0 |
 | 10 | compaction on either side | deliveries before the boundary count as seen; never re-sent | summary-level | inherent |
@@ -198,7 +216,10 @@ human reads A_N + elided B_N, types U_{N+1}
   - At `UserPromptSubmit` the new prompt's user entry is NOT in CC's transcript. CC writes it right after the hooks return (`file-history-snapshot`, then `user{uuid, parentUuid}`).
   - Esc-Esc and "Restore conversation" write nothing until submit.
   - pi `/tree` fires `session_before_tree`/`session_tree` with leaf ids and writes nothing to the file; the next message appends under the new leaf.
-  - **Fix:** after answering the submit's hooks, the extension waits (~50 ms polling, ≤3 s cap) for the new user entry, takes its `parentUuid` as the branch point, and only then builds B's package. On timeout it falls back to the tail, logged as `fork-unknown`.
+  - **Fix (implemented as `ccNewPrompt`):**
+    - After answering the submit's hooks, the extension polls for the new user entry: a non-meta, non-tool_result `user` entry, appended after the byte offset recorded at submit, with the same text.
+    - Its `parentUuid` gives the branch point, and only then is B's package built and B started.
+    - There is no tail fallback. If the entry never appears (cap ~60 s; e.g. another hook blocked the prompt), B is not started.
 - **Harness-agnostic shape:** the ledger, sync points, reducer and package builder speak only a neutral side view: ordered live items with stable ids, plus "where are my deliveries".
   - Per-harness adapters supply the view and the delivery mechanism: CC = transcript + hooks; pi = session + extension.
   - Nothing in core may assume which harness is A or B.
