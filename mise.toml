@@ -35,7 +35,7 @@ description = "check + test: the completion gate. Terse on success; failures pri
 raw = true
 run = [
    "tsc --noEmit --project tsconfig.json",
-   "biome check --error-on-warnings --reporter=summary .",
+   "biome check --error-on-warnings .",
    "node --test --test-reporter=dot \"src/**/*.test.ts\"",
 ]
 
