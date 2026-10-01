@@ -21,7 +21,7 @@ export function measurePackage(
    let rawChars = 0
    for (const item of trail.items) {
       if (item.kind === "call") rawChars += JSON.stringify(item.input ?? {}).length
-      else if (item.kind !== "halt") rawChars += item.text.length
+      else if ("text" in item) rawChars += item.text.length
    }
 
    const unreachable = pkg.interactions.flatMap((interaction) =>

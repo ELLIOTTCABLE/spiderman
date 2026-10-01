@@ -40,6 +40,8 @@ export type TrailItem =
         /** a short notice that a fuller report elsewhere in the span supersedes */
         readonly notice?: true
      }
+   /** the human rewound the conversation; turns the receiver saw from `withdrawn` on no longer stand */
+   | { readonly kind: "rewind"; readonly withdrawn?: string }
    /** the turn stopped early */
    | {
         readonly kind: "halt"

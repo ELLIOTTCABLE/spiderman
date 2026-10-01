@@ -598,3 +598,21 @@ test("paths under the shared cwd are shown relative to it; others stay absolute"
    ])
    assert.deepEqual(pkg.interactions[0]?.pointers, ["C:\\proj\\specs\\a.md"])
 })
+
+test("a rewind says which of the peer's turns no longer stand", () => {
+   assert.deepEqual(
+      body(
+         trail(
+            { kind: "rewind", withdrawn: "Rename the module, then\nmore" },
+            { kind: "prompt", text: "Rename it" },
+         ),
+      ),
+      [
+         `[the human rewound the peer's conversation to before the prompt "Rename the module, then…"; the peer's turns from that prompt on were withdrawn and no longer stand]`,
+         "[the human's prompt to the peer]\nRename it",
+      ],
+   )
+   assert.deepEqual(body(trail({ kind: "rewind" })), [
+      "[the human rewound the peer's conversation to an earlier point; the peer's later turns were withdrawn and no longer stand]",
+   ])
+})

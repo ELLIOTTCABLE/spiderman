@@ -48,13 +48,24 @@ export function ccTrail(
       const at = entries.findIndex(({ entry }, i) => i > start && matches(entry, until))
       if (at !== -1) end = at
    }
-   // a rewound-away start still marks a file position; live entries after it are unseen
-   const live = liveIndices(entries, end)
+   const branch = liveBranch(entries, end)
    const subagents = new Subagents(entries, options)
    const items: TrailItem[] = []
-   for (let i = start + 1; i < end; i++) {
+   let from = start
+   if (start !== -1 && !branch.live.has(start)) {
+      const rewind = rewound(entries, start, branch)
+      if (rewind !== undefined) {
+         from = rewind.fork
+         items.push(
+            rewind.withdrawn === undefined
+               ? { kind: "rewind" }
+               : { kind: "rewind", withdrawn: rewind.withdrawn },
+         )
+      }
+   }
+   for (let i = from + 1; i < end; i++) {
       const at = entries[i]
-      if (at === undefined || !live.has(i)) continue
+      if (at === undefined || !branch.live.has(i)) continue
       const { line, entry } = at
       if (entry.isSidechain === true) continue
       const converted =
@@ -92,11 +103,21 @@ function matches(entry: Entry, cursor: Cursor): boolean {
       : entry.promptId === cursor.promptId
 }
 
+interface Branch {
+   /** the parent chain back from the newest entry before `end` */
+   readonly chain: ReadonlySet<number>
+   /** the chain plus the side branches of its parallel tool calls */
+   readonly live: ReadonlySet<number>
+   readonly parent: (index: number) => number | undefined
+}
+
 // rewinds leave abandoned branches in the file: walk the parent chain back from `end`. parallel
 // tool calls hang off it as side branches; their message ids pull them and their results back in
-function liveIndices(entries: readonly Line[], end: number): Set<number> {
-   if (!entries.some(({ entry }) => typeof entry.parentUuid === "string"))
-      return new Set(entries.keys())
+function liveBranch(entries: readonly Line[], end: number): Branch {
+   if (!entries.some(({ entry }) => typeof entry.parentUuid === "string")) {
+      const all = new Set(entries.keys())
+      return { chain: all, live: all, parent: (i) => (i > 0 ? i - 1 : undefined) }
+   }
    const byUuid = new Map<string, number>()
    entries.forEach(({ entry }, i) => {
       if (typeof entry.uuid === "string") byUuid.set(entry.uuid, i)
@@ -107,14 +128,16 @@ function liveIndices(entries: readonly Line[], end: number): Set<number> {
       return typeof id === "string" ? byUuid.get(id) : undefined
    }
 
-   const live = new Set<number>()
+   const chain = new Set<number>()
    const messages = new Set<string>()
    const leaf = end < entries.length ? parent(end) : newestChained(entries)
-   for (let i = leaf; i !== undefined && !live.has(i); i = parent(i)) {
-      live.add(i)
+   for (let i = leaf; i !== undefined && !chain.has(i); i = parent(i)) {
+      chain.add(i)
       const id = messageId(entries[i]?.entry)
       if (id !== undefined) messages.add(id)
    }
+
+   const live = new Set(chain)
 
    const calls = new Set<string>()
    for (let i = 0; i < end; i++) {
@@ -138,7 +161,44 @@ function liveIndices(entries: readonly Line[], end: number): Set<number> {
       )
          live.add(i)
    }
-   return live
+   return { chain, live, parent }
+}
+
+/**
+ * The human rewound the conversation past `start` if the path from it back to the live chain
+ * holds turns. The fork is where that path meets the chain; `withdrawn` is the first prompt after it.
+ */
+function rewound(
+   entries: readonly Line[],
+   start: number,
+   branch: Branch,
+): { fork: number; withdrawn: string | undefined } | undefined {
+   const abandoned: Entry[] = []
+   let fork: number | undefined = start
+   while (fork !== undefined && !branch.chain.has(fork)) {
+      const entry = entries[fork]?.entry
+      if (entry !== undefined) abandoned.push(entry)
+      fork = branch.parent(fork)
+   }
+   if (fork === undefined) return undefined
+   const turns = abandoned.filter(
+      (e) => (e.type === "user" || e.type === "assistant") && e.isMeta !== true,
+   )
+   if (turns.length === 0) return undefined
+   const prompt = turns.findLast(isHumanPrompt)
+   return { fork, withdrawn: prompt === undefined ? undefined : promptText(prompt) }
+}
+
+function isHumanPrompt(entry: Entry): boolean {
+   if (entry.type !== "user" || entry.isMeta === true) return false
+   const origin = isRecord(entry.origin) ? entry.origin.kind : undefined
+   if (origin !== undefined) return origin === "human"
+   return contentBlocks(entry).every((b) => b.type !== "tool_result")
+}
+
+function promptText(entry: Entry): string {
+   const content = isRecord(entry.message) ? entry.message.content : undefined
+   return typeof content === "string" ? content : textBlocks(contentBlocks(entry))
 }
 
 function newestChained(entries: readonly Line[]): number | undefined {

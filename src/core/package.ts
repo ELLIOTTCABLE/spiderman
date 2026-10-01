@@ -70,6 +70,7 @@ const GENERIC_INPUT_LIMIT = 300
 const INLINE_DIFF_LIMIT = 1_500
 const DIFF_BUDGET = 8_000
 const BRIEF_LIMIT = 160
+const PROMPT_QUOTE_LIMIT = 100
 const REPORT_LIMIT = 1_500
 // bounds a long session's memory; older reads are simply shown again
 const MEMORY_READS = 1_000
@@ -116,6 +117,8 @@ export function formatPeerPackage(
             segments.push({ kind: "prose", text: block.raw })
       } else if (item.kind === "halt") {
          segments.push({ kind: "frame", text: haltLine(item) })
+      } else if (item.kind === "rewind") {
+         segments.push({ kind: "frame", text: rewindLine(item.withdrawn) })
       } else if (item.kind === "call") {
          const result = item.id === undefined ? undefined : results.get(item.id)
          const spec = classify(item.name)
@@ -171,6 +174,14 @@ function withinDiffBudget(segments: readonly Segment[]): Segment[] {
 
 export function packageText(pkg: PeerPackage): string {
    return pkg.segments.map((s) => s.text).join("\n\n")
+}
+
+function rewindLine(withdrawn: string | undefined): string {
+   const point =
+      withdrawn === undefined
+         ? "an earlier point; the peer's later turns"
+         : `before the prompt "${clip(withdrawn, PROMPT_QUOTE_LIMIT)}"; the peer's turns from that prompt on`
+   return `[the human rewound the peer's conversation to ${point} were withdrawn and no longer stand]`
 }
 
 function haltLine(halt: Extract<TrailItem, { kind: "halt" }>): string {

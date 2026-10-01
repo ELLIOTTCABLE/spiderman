@@ -242,7 +242,7 @@ test("a rewound branch is left out; the branch the human continued on is read", 
    )
 })
 
-test("a start that was rewound away yields what follows it on the live branch", () => {
+test("a start that was rewound away is marked, then the live branch after the fork follows", () => {
    const p1 = prompt("first", "p1")
    const a1 = said("m1", "answer one")
    const p2 = prompt("abandoned", "p2")
@@ -252,11 +252,40 @@ test("a start that was rewound away yields what follows it on the live branch", 
    const trail = ccTrail(jsonl(p1, a1, p2, a2, p3, a3), { after: { promptId: "p2" } })
    assert.deepEqual(trail, {
       items: [
+         { kind: "rewind", withdrawn: "abandoned" },
          { kind: "prompt", text: "edited instead" },
          { kind: "text", text: "answer three" },
       ],
       issues: [],
    })
+})
+
+test("a rewind past several delivered turns names the first one withdrawn", () => {
+   const p1 = prompt("first", "p1")
+   const a1 = said("m1", "answer one")
+   const p2 = prompt("second", "p2")
+   const a2 = said("m2", "answer two")
+   const p3 = prompt("third", "p3")
+   const a3 = said("m3", "answer three")
+   const p4 = after(a1, prompt("second, again", "p4"))
+   const trail = ccTrail(jsonl(p1, a1, p2, a2, p3, a3, p4), {
+      after: { uuid: a3.uuid },
+      until: { promptId: "p4" },
+   })
+   assert.deepEqual(trail.items, [{ kind: "rewind", withdrawn: "second" }])
+})
+
+test("a start beside the chain that holds no turns is not a rewind", () => {
+   const p1 = prompt("first", "p1")
+   const a1 = said("m1", "answer one")
+   const hook = after(a1, attachment({ type: "hook_success" }))
+   const p2 = after(a1, prompt("next", "p2"))
+   const a2 = said("m2", "answer two")
+   const trail = ccTrail(jsonl(p1, a1, hook, p2, a2), { after: { uuid: hook.uuid } })
+   assert.deepEqual(trail.items, [
+      { kind: "prompt", text: "next" },
+      { kind: "text", text: "answer two" },
+   ])
 })
 
 test("parallel tool calls on side branches keep both calls and both results", () => {
