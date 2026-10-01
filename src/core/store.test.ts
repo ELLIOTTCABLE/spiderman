@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { ensureStateDir, peerStore, type StoreFs, sha256Hex } from "./store.ts"
+import { ensureStateDir, type PeerStoreFs, peerStore, sha256Hex } from "./store.ts"
 
 function memoryFs() {
    const files = new Map<string, string>()
    const dirs = new Set<string>()
    let writes = 0
-   const fs: StoreFs = {
+   const fs: PeerStoreFs = {
       mkdirSync(path) {
          dirs.add(path)
       },
@@ -51,7 +51,7 @@ test("a file already written by another process counts as stored", () => {
 })
 
 test("other write failures propagate", () => {
-   const fs: StoreFs = {
+   const fs: PeerStoreFs = {
       mkdirSync() {},
       writeFileSync() {
          throw Object.assign(new Error("EACCES"), { code: "EACCES" })

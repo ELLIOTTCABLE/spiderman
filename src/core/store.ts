@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto"
 
+// `node:fs` satisfies this
 export interface StoreFs {
    mkdirSync(path: string, options: { recursive: true }): unknown
    writeFileSync(path: string, data: string, options: { flag: "wx" }): void
+}
+
+export interface PeerStoreFs extends StoreFs {
    /** undefined when unreadable */
    readText(path: string): string | undefined
 }
@@ -21,7 +25,7 @@ export interface PeerStore {
 // a realistic collision, and a name taken by other content just grows
 const SHORT_HASH = 16
 
-export function peerStore(root: string, fs: StoreFs, hash: Hash): PeerStore {
+export function peerStore(root: string, fs: PeerStoreFs, hash: Hash): PeerStore {
    const dir = `${root}/peer`
    return {
       put(text) {
