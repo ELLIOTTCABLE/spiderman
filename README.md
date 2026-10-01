@@ -27,7 +27,9 @@ claude --plugin-dir <repo>/plugin
 
 ## Using it
 
-- Type only in Claude Code. Text typed into pi's pane is swallowed, with a notice.
+- Type your shared prompts in Claude Code. You can also type in pi's pane, e.g. to ask B something directly: that turn is B's alone, and Claude sees it, marked as a direct message to the peer, with your next prompt. While B is eliding its answer (`bx`), what you type in pi's pane waits and goes in right after.
+- Rewind either side freely: Esc-Esc or `/rewind` in Claude Code, `/tree` in pi. Spiderman doesn't follow a rewind to the other side. Each side's next delivery carries whatever the peer's current branch holds that this side's current branch lacks; abandoned turns are never sent. `/tree` in pi waits only while B is eliding.
+- `@path` in your prompt reaches B as a plain path when it names a file or directory under the project, so B reads it itself, as Claude does. Other `@` words stay as typed.
 - Start a prompt with `~` to ask Claude alone. B skips that turn, but sees the exchange later as part of Claude's record.
 - Under Claude's answer, `Stop says: [peer 1/2] …` is B's answer. It is plain text, and long answers span several blocks. The full text is in `.spiderman/turns/<pi session id>/b-<n>.md`.
 - Claude gets B's full answer, never the elided one, along with B's tool calls. Tool outputs are referenced by path under `.spiderman/peer/`.
