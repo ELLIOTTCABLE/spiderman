@@ -184,6 +184,22 @@ human reads A_N + elided B_N, types U_{N+1}
 - **Transcript structure:** 23% of prompts are abandoned edit/rewind siblings, so walk the parent chain. CC writes one content block per assistant entry, grouped by `message.id`.
 - **Noise:** pi `todo` is 5% of package for zero information. CC Skill bodies hide in `isMeta` entries.
 
+## End-to-end on real harnesses (2026-09-30 ~23:30; haiku A + luna B, interactive via ConPTY; +SURE)
+- **All 7 scenarios pass:** parallel start; packages carry pointers, not content; mid-turn submit doesn't stall; solo; pi-pane input swallowed; peer loss and re-pair; hand-back capture.
+- **Hook stdin has no `source` field**, for human or notification turns alike. Detection relies on the `<task-notification>` prefix. Notification turns get a fresh `prompt_id`.
+- **A's cache grows monotonically.**
+- **B's Codex cache does NOT extend.** `cacheRead` stays at the first cached prefix (P4: 18,176 at +1/+7/+35/+70 min; e2e: 1,536 flat) while uncached input grows every turn, even with a verified byte-stable, append-only payload.
+  - The first prefix survives 35-min gaps.
+  - This violates the cache-preservation requirement for long sessions. Under investigation: real-session evidence, a pi vs Codex CLI request diff, payload experiments.
+- **Bugs being fixed:**
+  - duplicate A-trail after a mid-turn + solo sequence;
+  - `turns/b-N.md` collides across pi sessions;
+  - A→B paths absolute (fixed by threading `cwd`).
+- **Also landing:**
+  - per-turn sections when several answers arrive together;
+  - backlog at pairing = the last completed A turn;
+  - `/tree` in B's pane cancelled.
+
 ## Lanes
 - `smoke` / `probes`: prober builder, scratch only. Smoke done. Round 2 covers:
   - pi OAuth-refresh locking;
@@ -205,11 +221,13 @@ human reads A_N + elided B_N, types U_{N+1}
     - a Stop during transcript lag may repeat A's final text in the next package.
   - Follow-ups in flight: unconditional SessionStart instructions (start order shouldn't matter), deadline propagation from hook to server, non-human prompt detection.
   - `PackageMemory` is defined but not threaded. The tuning lane threads it through `runtime.ts` after it folds.
-- `tune`: tuning builder in `.tmp/trees/tune` (`ai/tune`).
-  - Owns `cc-trail`, `pi-trail`, `package` and `chunk`.
-  - Applies the real-session findings above plus cross-turn read dedupe (`PackageMemory`).
-  - Measures against the human's Dorc sessions from scratch only; real content never enters the repo.
-- Next, once both land: fold, then the prober's real-harness end-to-end run (haiku A + luna B, interactive, via PTY).
+- `tune`: merged at def838b; branch deleted.
+  - Measured on 155 CC + 38 pi real turns: packages −12% (CC) and −13% (pi) vs the first policy; median ~5.4K/3.8K chars, max 23K/26K. Nothing over the cap, 100% reach.
+  - Edit cap 1,500 (chosen by data); 8K diff budget; rewinds deliver from the fork point with a "withdrawn" line; 16-hex CAS names; relative paths.
+  - Cross-turn memory saves only 0.1%.
+  - The ~280-char frame repeats per package (4–5%). Kept, for prompt-injection robustness.
+- `post-merge` (integration builder, `.tmp/trees/core`): e2e bug fixes and wiring, listed above.
+- `b-cache` (prober, scratch): why B's Codex cache doesn't extend.
 
 ## Open questions for the human (non-blocking; defaults applied)
 - `ask-bx-versus-mediator`: is the mediator default acceptable, given the token remit?
