@@ -29,7 +29,7 @@ claude --plugin-dir <repo>/plugin
 
 - Type only in Claude Code. Text typed into pi's pane is swallowed, with a notice.
 - Start a prompt with `~` to ask Claude alone. B skips that turn, but sees the exchange later as part of Claude's record.
-- Under Claude's answer, `Stop says: [peer 1/2] …` is B's answer. It is plain text, and long answers span several blocks. The full text is in `.spiderman/turns/b-<n>.md`.
+- Under Claude's answer, `Stop says: [peer 1/2] …` is B's answer. It is plain text, and long answers span several blocks. The full text is in `.spiderman/turns/<pi session id>/b-<n>.md`.
 - Claude gets B's full answer, never the elided one, along with B's tool calls. Tool outputs are referenced by path under `.spiderman/peer/`.
 - B gets Claude's answer and tool record the same way, followed by your prompt.
 
