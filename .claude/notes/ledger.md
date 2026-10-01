@@ -172,6 +172,18 @@ human reads A_N + elided B_N, types U_{N+1}
 - **Incident:** a haiku test session called Claude-in-Chrome tools despite `--tools ""` + `--strict-mcp-config`. The PTY rig's closing Enter likely answered "Allow" on the Chrome permission dialog. Both calls failed ("extension not connected"), so there was no effect. Fixed in the rig: `--no-chrome`, `--disallowedTools mcp__claude-in-chrome`, and Esc on any Allow/Deny dialog. Reported to the human.
 - **Fixtures:** scrubbed `cc-transcript.jsonl` + `pi-session.jsonl` + README in `scratchpad/fixtures/`.
 
+## Real-session shape (human's Dorc design sessions, 2026-09-23..30; +SURE measured)
+- **Scope:** 144 CC turns (all Fable) and 39 pi turns (mostly gpt-6-astra). Scripts are in `scratchpad/dorc-stats/`.
+- **Human think time:** median 6.4 min, p90 22 min. 61% of gaps exceed 5 min; 3% exceed 1 h. A's 1 h TTL almost always holds; B's survival is the P4 probe.
+- **Answers:** median 3.6K chars, p90 7.5K, with a median of 8 markdown blocks. Human prompts: median 0.8K, p90 2.3K.
+- **Package under the first policy:** median 7K, p90 22K, max 76K. 5.6% of turns exceed the 4×9.5K cap.
+  - Edits/Writes dominate: 48% overall, 77% of the worst turns, nearly all `.md` notes.
+  - Capping inline edits at ~1.5K and pointing at Writes removes every CC overflow.
+- **Reads:** median output 16.7K; 19% are repeats. CC rarely persists outputs itself, so the package synthesizes pointers.
+- **Subagent reports:** median 15.7K. They arrive later as `origin.kind:"peer"` / `task-notification` user turns, so they are never human prompts for B.
+- **Transcript structure:** 23% of prompts are abandoned edit/rewind siblings, so walk the parent chain. CC writes one content block per assistant entry, grouped by `message.id`.
+- **Noise:** pi `todo` is 5% of package for zero information. CC Skill bodies hide in `isMeta` entries.
+
 ## Lanes
 - `smoke` / `probes`: prober builder, scratch only. Smoke done. Round 2 covers:
   - pi OAuth-refresh locking;
@@ -180,7 +192,14 @@ human reads A_N + elided B_N, types U_{N+1}
   - UserPromptSubmit on mid-turn messages;
   - a Codex cache idle-gap schedule (~75 min, background);
   - scrubbed fixtures.
-- `core`: core builder in `.tmp/trees/core` (`ai/core`). Toolchain + pure core (TDD), then a stop for the integration brief.
+- `core`: done and folded (toolchain + pure core, 114 tests). The same builder continues as `integration` in `.tmp/trees/core`: reducer, pi extension, CC plugin, README.
+  - It does not touch the trail/package/chunk modules.
+  - `PackageMemory` is opaque to it.
+- `tune`: tuning builder in `.tmp/trees/tune` (`ai/tune`).
+  - Owns `cc-trail`, `pi-trail`, `package` and `chunk`.
+  - Applies the real-session findings above plus cross-turn read dedupe (`PackageMemory`).
+  - Measures against the human's Dorc sessions from scratch only; real content never enters the repo.
+- Next, once both land: fold, then the prober's real-harness end-to-end run (haiku A + luna B, interactive, via PTY).
 
 ## Open questions for the human (non-blocking; defaults applied)
 - `ask-bx-versus-mediator`: is the mediator default acceptable, given the token remit?
