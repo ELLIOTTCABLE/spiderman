@@ -32,6 +32,7 @@ claude --plugin-dir <repo>/plugin
 - Under Claude's answer, `Stop says: [peer 1/2] …` is B's answer. It is plain text, and long answers span several blocks. The full text is in `.spiderman/turns/<pi session id>/b-<n>.md`.
 - Claude gets B's full answer, never the elided one, along with B's tool calls. Tool outputs are referenced by path under `.spiderman/peer/`.
 - B gets Claude's answer and tool record the same way, followed by your prompt.
+- Over Remote Control (claude.ai/code, the phone app), whether the `Stop says:` blocks render is untested. Claude Code's binary suggests it forwards them.
 
 ## Flags (pi side)
 
@@ -51,7 +52,7 @@ Each hook tells pi how long it can wait (its timeout in `plugin/hooks/hooks.json
 Everything lives in `<project>/.spiderman/`, which ignores itself in git.
 
 - `peer.json`: pi's port and token, while pi runs.
-- `peer/<sha256>.txt`: tool outputs and snapshots that packages point at.
+- `peer/<hash>.txt`: tool outputs and snapshots that packages point at.
 - `turns/`: B's full answers and full packages.
 - A per-turn log sits next to pi's session file (`<session>.spiderman.jsonl`), or in `.spiderman/log.jsonl` without one.
 
