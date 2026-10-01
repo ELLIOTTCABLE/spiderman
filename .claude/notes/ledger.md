@@ -31,6 +31,34 @@ human reads A_N + elided B_N, types U_{N+1}
 - Packages are always "everything since last delivered", so solo turns, interrupted turns (Stop doesn't fire on interrupt), and late peers all self-heal at the next prompt.
 - A always receives B's full answer, never the elided rendering. Elision only governs what the human reads.
 
+### Turn state machine (rewritten after probe P2/P3; the diagram above is the common case only)
+- **Probe facts (+SURE):**
+  - `UserPromptSubmit` fires *at submit time*, including for prompts typed while A is mid-turn or while Stop hooks run, and it then carries the previous turn's stale `prompt_id`.
+  - A prompt queued during a no-tool turn becomes a new A turn after Stop, without another `UserPromptSubmit`.
+  - A prompt submitted during tool use is merged into A's running turn as a `queued_command`, and one Stop then covers both.
+  - Prompts typed while Stop hooks run are queued until those hooks finish.
+- **Implementation shape.** A pure reducer `step(state, event) → {state, effects}` carries all the logic and is unit-tested exhaustively. The pi extension is the effectful shell.
+  - Events: `submit{prompt, session_id, prompt_id, transcript_path, k}` ×K, `stop{last_assistant_message, transcript_path}`, `bSettled{messages}`.
+  - Effects: respond-to-hook, start-B-turn, log.
+- **Rules:**
+  - Dedupe the K chunk-hook calls by `(session_id, prompt_id, sha(prompt))` within a short window. `prompt_id` alone is stale, so it can't be the key.
+  - Every non-solo submit appends to `pendingHuman`, tagged `aIdleAtSubmit`.
+  - A is "running" from an idle-time submit until `stop`.
+  - **Start B** when B is idle, `pendingHuman` is non-empty, and either the first pending entry has `aIdleAtSubmit` or A is no longer running. B's turn is A-package(since the last delivered cut, ending before the first pending prompt) + all pending human messages, in order.
+    - Common case: B starts at submit, in parallel with A.
+    - Mid-turn case: B starts at A's Stop, so B sees A's completed answer.
+  - **Submit while A is idle** (common): respond with all undelivered B messages, waiting up to a cap if B is still running.
+  - **Submit while A is running:** respond immediately with whatever is undelivered, never wait, so the hook doesn't stall A's live turn.
+  - **Stop:** wait (capped) for the latest not-yet-displayed B turn to settle, run elision, and return display chunks. Reconcile A's trail with `last_assistant_message`, because the transcript may lag at Stop.
+- **Multi-chunk ordering.**
+  - Each chunk hook gets its own attachment or `systemMessage` block, in *completion* order (+SURE).
+  - The server releases chunk k at t₀ + k·~250 ms, so reading order holds, and every chunk is labelled `k/K` anyway.
+  - Over 10k chars, CC persists the string to a file and shows the model a 2 KB preview; haiku missed the path in the probe. Never exceed the cap.
+- **Display.**
+  - `systemMessage` renders as raw text (no markdown), prefixed `Stop says:`, each hook as its own block.
+  - A's answer is fully visible before Stop hooks return; the spinner reads "running Stop hooks… i/K".
+  - The Stop cap is configurable (default ~5 min). On cap, show "peer still answering; its answer reaches A with your next prompt".
+
 ### dec-mediator-replaces-bx
 - The report's Bx step (B elides its own answer in an extra turn of B's session) costs a cached read of B's whole, growing context on an expensive model, once per human turn. That violates the token-economy remit.
 - Default replacement: a stateless mediator call with input A_N + B_N and the Bx instruction, on a cheap model (default `openai-codex/gpt-6-luna`, configurable). It returns the same anchor format, with the same fail-safe.
@@ -69,6 +97,20 @@ human reads A_N + elided B_N, types U_{N+1}
 - Edits go inline as diffs. Writes are referenced, with a line count.
 - Neither side's private reasoning is forwarded.
 - A's trail comes from its transcript JSONL, read at the *next* prompt, when it is surely flushed. Parse defensively; on failure fall back to the Stop hook's `last_assistant_message`.
+
+### Package policy: least noise, maximum reach (human's named tuning priority)
+- The receiver gets the smallest package that still lets it follow up on anything the peer saw or did.
+- **Reads:** a one-line `read <path> L<a>–<b>`. The peer's snapshot goes to the CAS only if the file has changed since. Repeated reads collapse to "(again)".
+- **Search/list/shell:**
+  - The input goes inline.
+  - Tiny outputs go inline too; anything larger becomes a CAS pointer plus a size line.
+  - Outputs that CC already persisted to a file are pointed at directly, not copied.
+- **Edits:** an inline compact diff. **Writes:** path plus line count.
+- **Subagents:** the prompt goes in briefly; the final report inline, capped; plus a pointer to the subagent transcript.
+- **Errors:** a one-line marker. **Noise tools** (TodoWrite, status chatter): dropped. **Unknown tools:** a generic fallback; never dropped silently.
+- Thinking/reasoning is never forwarded.
+- Measured, not eyeballed. Fixture tests assert two properties: package size against the raw trail, and *reach* (every interaction is either inline or has a resolvable pointer).
+- Planned after integration: a tuning pass over realistic tool-heavy sessions on cheap models, iterating the thresholds.
 
 ### Pairing and runtime
 - The pi extension, on `session_start`, starts an HTTP server on 127.0.0.1 with a random port and a bearer token. It writes `<cwd>/.spiderman/peer.json`.
@@ -123,6 +165,12 @@ human reads A_N + elided B_N, types U_{N+1}
   - Scrub inherited `CLAUDE_*`/`CLAUDE_CODE_*` env from child sessions; it carries the parent's RC bridge and IDE port.
   - Spawn the real `mise/installs/.../claude.exe` and `pi.exe`, not the shims, so kills land.
   - Interactive CC under `C:\Users\ec` asks once about external CLAUDE.md imports.
+
+## Probe results, round 2 (2026-09-30, +SURE unless marked)
+- **pi OAuth refresh is cross-process safe.** It uses `proper-lockfile` on `auth.json` and re-checks expiry inside the lock (`coding-agent/src/core/auth-storage.ts:116-155`, `ai/src/auth/resolve.ts:102-140`). Concurrent pi processes are OK.
+- **Codex server-side cache survives the 5-min WebSocket TTL.** Turn after a 6-min gap: `cacheRead` 18,176 of 18,390. The 35- and 70-min points are pending: `scratchpad/probes/out/p4/turns.jsonl`, finishing ~23:28 local.
+- **Incident:** a haiku test session called Claude-in-Chrome tools despite `--tools ""` + `--strict-mcp-config`. The PTY rig's closing Enter likely answered "Allow" on the Chrome permission dialog. Both calls failed ("extension not connected"), so there was no effect. Fixed in the rig: `--no-chrome`, `--disallowedTools mcp__claude-in-chrome`, and Esc on any Allow/Deny dialog. Reported to the human.
+- **Fixtures:** scrubbed `cc-transcript.jsonl` + `pi-session.jsonl` + README in `scratchpad/fixtures/`.
 
 ## Lanes
 - `smoke` / `probes`: prober builder, scratch only. Smoke done. Round 2 covers:

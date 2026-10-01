@@ -21,5 +21,10 @@ Read first: `.claude/notes/ledger.md` (current design, decisions, status). Refer
 ## Agents working here
 - Commits: load the `commit` skill; labels come from `.gitlabels`; commit granularly; never push.
 - Real-harness experiments use only the cheapest models: `claude --model haiku`, and `pi --model openai-codex/gpt-6-luna`, always provider-qualified, because the bare id also resolves to a pay-as-you-go provider.
-- Test sessions run in scratch directories outside this repo: tools restricted to read-only, Remote Control and push notifications off (`--settings '{"remoteControlAtStartup":false,"agentPushNotifEnabled":false,"inputNeededNotifEnabled":false}'`), pi isolated (`-ne -ns -np -nc --offline`, own session dir). One pi process at a time. Kill every process you start.
+- Test sessions run in scratch directories outside this repo.
+   - `claude`: tools restricted, `--no-chrome --strict-mcp-config --disallowedTools mcp__claude-in-chrome`, `--setting-sources project,local`, and Remote Control and push notifications off (`--settings '{"remoteControlAtStartup":false,"agentPushNotifEnabled":false,"inputNeededNotifEnabled":false}'`).
+   - `pi`: isolated (`-ne -ns -np -nc --offline`, own session dir, explicit `--mode`).
+   - Scrub inherited `CLAUDE_*`/`CLAUDE_CODE_*` env from children. Spawn the real `claude.exe`/`pi.exe` from `mise/installs`, not the shims, so kills land.
+   - Kill every process you start.
+   - In a PTY, never send a blind Enter: permission dialogs default to Allow. Answer them with Esc.
 - Never read credential files (`auth.json`, `.credentials*`); never log `Authorization` headers.
