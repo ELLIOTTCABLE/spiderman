@@ -1,4 +1,4 @@
-import type { Trail, TrailItem } from "./trail.ts"
+import type { Trail, TrailItem, TrailResult } from "./trail.ts"
 import { isRecord } from "./validate.ts"
 
 // `unknown`: other extensions add message roles. User messages are skipped: in B's session each
@@ -28,15 +28,27 @@ export function piTrail(messages: readonly unknown[]): Trail {
             issues.push(`message ${i}: unreadable tool result`)
             return
          }
-         items.push({
+         const result: TrailResult = {
             kind: "result",
             id,
             text: message.content.map(resultText).join("\n"),
             isError: message.isError === true,
-         })
+         }
+         items.push(withSavedOutput(result, message.details))
       }
    })
    return { items, issues }
+}
+
+// pi's bash keeps only the tail in the result; the full output is in a temp file
+function withSavedOutput(result: TrailResult, details: unknown): TrailResult {
+   if (!isRecord(details) || typeof details.fullOutputPath !== "string") return result
+   const path = details.fullOutputPath
+   const total = isRecord(details.truncation) ? details.truncation.totalLines : undefined
+   return {
+      ...result,
+      saved: typeof total === "number" ? { path, size: `${total} lines` } : { path },
+   }
 }
 
 function assistantBlock(block: unknown): TrailItem | "skip" | undefined {
