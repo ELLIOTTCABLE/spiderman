@@ -1,6 +1,6 @@
 # spiderman
 
-You talk to Claude in Claude Code (A). A second model in pi (B) answers every prompt in parallel. Each model gets the other's previous answer with your next prompt, and under each of A's answers you see B's answer, with the paragraphs that only repeat A collapsed to one line each, quoting their first words: `[elided: "first eight words…"]`. A paragraph with a number or code that A's answer lacks is never collapsed.
+You talk to Claude in Claude Code (A). A second model in pi (B) answers every prompt in parallel. Each model gets the other's previous answer with your next prompt, and under each of A's answers you see B's answer, with the paragraphs that only repeat A collapsed to one line each, quoting their first words: `[elided: "first eight words…"]`. A model picks those paragraphs by number (see `--spiderman-strategy`); a paragraph with a number or code that A's answer lacks is never collapsed, whatever it picks.
 
 Experimental. The plumbing is meant to be careful; the surface is rough.
 
@@ -38,12 +38,17 @@ claude --plugin-dir <repo>/plugin
 
 | flag | default | meaning |
 |---|---|---|
-| `--spiderman-strategy` | `mediator` | `mediator`: a cheap model picks redundant paragraphs; `off`: show B in full |
-| `--spiderman-mediator` | `openai-codex/gpt-6-luna` | the elision model, `provider/id`, matched exactly |
+| `--spiderman-strategy` | `mediator` | who picks B's redundant paragraphs. `mediator`: a separate call that sees only A's and B's answers. `bx`: B itself, in an extra turn of its own session that is then rewound. `off`: show B in full |
+| `--spiderman-mediator` | B's model | the mediator's model, `provider/id`, matched exactly, and on an allowed provider; by default B's own model at B's thinking level |
 | `--spiderman-providers` | `openai-codex` | providers B may run on; on anything else your prompt isn't sent to B |
 | `--spiderman-prompt-wait` | `25` | seconds a prompt waits for B's previous answer |
 | `--spiderman-stop-wait` | `300` | seconds the Stop hook waits for B's answer |
 | `--spiderman-solo` | `~` | prefix for Claude-only prompts |
+
+What elision costs, per B answer:
+
+- `mediator`: one request on the mediator model, outside B's session, so it shares no cache with B: both answers in, one line out, plus any reasoning at B's thinking level. On B's own model that is a frontier-priced call; `--spiderman-mediator openai-codex/gpt-6-luna` makes it cheap, at some cost in judgment.
+- `bx`: one extra turn in B's session. It re-reads B's whole context, mostly as cached input, which grows with the session, plus A's answer, and writes one line plus its reasoning. Afterwards pi's session is rewound to before that turn, so the exchange stays in the session file but leaves B's context: B's next turn starts from the earlier, cached prefix. Your next prompt reaches B only after the rewind.
 
 Each hook tells pi how long it can wait (its timeout in `plugin/hooks/hooks.json`, 40 s and 420 s, minus a margin), and pi cuts its waits to fit: a wait flag set beyond the timeout is capped there.
 
@@ -61,7 +66,9 @@ Everything lives in `<project>/.spiderman/`, which ignores itself in git.
 - **"no peer is running"**: pi isn't up in this project, or it started in another directory. The notice repeats at most every ten minutes.
 - **"another Claude Code session is paired"**: one Claude Code session pairs with one pi session. `/clear` in the paired terminal keeps the pair.
 - **"peer is still answering"**: B was slower than the wait. Its answer reaches Claude with your next prompt.
-- **`[elision unavailable (…); shown in full]`**: the mediator failed or answered badly. Nothing is hidden.
+- **`[elision unavailable (…); shown in full]`**: the mediator or B's elision turn failed, timed out, or answered with no clear list. Nothing is hidden.
+- **`[elision: ignored paragraph numbers out of range: …]`**: the elider named paragraphs B's answer doesn't have. Its other picks still apply.
+- **`/spiderman-rewind`** in pi's command list belongs to the `bx` strategy. Typed by hand, it does nothing.
 - **"B's provider is …, not one of …"**: pi's model isn't on the allowlist, so your prompt wasn't sent to B. Switch pi's model, or extend `--spiderman-providers`.
 - The Stop hook keeps Claude Code's spinner on "running Stop hooks" until B's answer is ready, up to the stop wait.
 
