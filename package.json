@@ -1,0 +1,22 @@
+{
+   "name": "spiderman",
+   "private": true,
+   "type": "module",
+   "engines": {
+      "node": ">=25"
+   },
+   "devDependencies": {
+      "@biomejs/biome": "2.5.15",
+      "@earendil-works/pi-coding-agent": "0.99.1",
+      "@types/node": "25.9.8",
+      "typescript": "7.0.2"
+   },
+   "overrides": {
+      "@earendil-works/chord": "0.99.1",
+      "@earendil-works/pi-agent-core": "0.99.1",
+      "@earendil-works/pi-ai": "0.99.1",
+      "@earendil-works/pi-codemode": "0.99.1",
+      "@earendil-works/pi-mcp": "0.99.1",
+      "@earendil-works/pi-tui": "0.99.1"
+   }
+}
