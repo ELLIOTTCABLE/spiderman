@@ -19,7 +19,10 @@ export interface ChunkOptions {
 // 3. drop the interim narration between tool calls; the final answer stays
 // 4. cut the final answer at the end
 // 2–4 end the last chunk with a pointer to the full package
-export function chunkPackage(pkg: PeerPackage, options: ChunkOptions): string[] {
+export function chunkPackage(
+   pkg: Pick<PeerPackage, "segments"> & Partial<PeerPackage>,
+   options: ChunkOptions,
+): string[] {
    const { maxChunks, maxChars, fullPath } = options
    const label = (k: number, count: number) => `[peer ${k}/${count}]\n`
    const labelSize = label(maxChunks, maxChunks).length
