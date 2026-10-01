@@ -232,10 +232,45 @@ human reads A_N + elided B_N, types U_{N+1}
   - Edit cap 1,500 (chosen by data); 8K diff budget; rewinds deliver from the fork point with a "withdrawn" line; 16-hex CAS names; relative paths.
   - Cross-turn memory saves only 0.1%.
   - The ~280-char frame repeats per package (4–5%). Kept, for prompt-injection robustness.
-- `post-merge` (integration builder, `.tmp/trees/core`): e2e bug fixes and wiring, listed above.
-- `b-cache` (prober, scratch): why B's Codex cache doesn't extend.
+- `post-merge`, `b-cache`, `elide`: done and folded; see "Final state".
 
-## Open questions for the human (non-blocking; defaults applied)
-- `ask-bx-versus-mediator`: is the mediator default acceptable, given the token remit?
-- `ask-mediator-model-quality`: luna is cheap but weak at redundancy judgement. False elisions are the costly failure. Should it be a mid-tier model?
-- `ask-phone-rendering-test`: 2-minute morning test of `systemMessage` on claude.ai/code and the phone. Instructions will be in the final report.
+## Elision safety (2026-10-01 ~00:30)
+- Mediator check: 4 synthetic pairs on luna. One FALSE elision: it collapsed a paragraph with numbers A lacked, against its own prompt. Otherwise it caught most redundancy, and elided nothing where there was none.
+- Response, landed:
+  - a deterministic keep-only veto (`veto.ts`): a B block containing a number or code token that A's text lacks is never elided;
+  - per-block previews `[elided: "first eight words…"]`, so the human can spot a wrong collapse;
+  - `vetoed: n` in the sidecar.
+- Across 11 real e2e turns luna elided nothing. With small, dissimilar haiku/luna answers that's plausible. Untested with Opus + Astra.
+
+## Final state (overnight run end, 2026-10-01)
+- **Branch:** `ai/main`, gate green. No worktrees, no other branches. Untested on macOS.
+- **Verified on real harnesses** (haiku A + luna B, interactive ConPTY):
+  - parallel turns;
+  - packages with pointers, not content;
+  - mid-turn prompts;
+  - solo `~`;
+  - pi-pane input swallowed;
+  - peer loss and re-pair;
+  - no duplicate A-trail after a mid-turn + solo sequence;
+  - relative paths;
+  - per-answer sections;
+  - pairing backlog;
+  - both caches growing.
+- **Untested or known jank:**
+  - **Remote Control rendering of `Stop says:`.** The binary suggests it's forwarded; the human tests this.
+  - **`/tree` in B's pane.** The selector opens without a notice; cancelling at selection is untested.
+  - **pi restart.** That turn files survive it is verified by code only.
+  - **A merged mid-turn prompt.** B's answer to it displays only at a later Stop.
+  - **Stop and the next prompt.** The Stop hook holds the spinner, and queues the next prompt, until B is done plus the mediator. Capped at 300 s.
+  - **Mediator quality on frontier models** is unmeasured.
+  - **Stale `peer.json` after a hard pi kill** falls back to the "no peer" notice (by code).
+- **Spend:** about 3.3M tokens across conductor, builders and scouts, against a ~10M budget. About 75 haiku and 75 luna requests for experiments.
+- **Incident:** a haiku test session called Claude-in-Chrome tools. No browser was connected, so there was no effect. The rig is fixed.
+- **Machine:** memory got low late in the run (~4.6 GB free of 32 GB, with about 20 of the human's own `claude.exe` sessions open). Real-harness runs stopped there.
+
+## Open questions for the human (defaults applied; none blocking)
+- `ask-bx-versus-mediator`: Bx replaced by a stateless mediator for token economy. Acceptable? Bx is unbuilt; `RuntimeDeps.mediate` is the seam.
+- `ask-mediator-model-quality`: luna is cheap, but made one false elision; the veto now catches that class. Keep luna, or move to a mid-tier model (`--spiderman-mediator openai-codex/gpt-6-sol`)?
+- `ask-phone-rendering-test`: 2-minute test of whether `Stop says:` blocks appear on claude.ai/code and the phone.
+- `ask-peer-frame-trim`: the ~280-char frame repeats per package (4–5% of size). Kept for prompt-injection robustness; trimmable.
+- `ask-hk-hook-install`: the hk pre-commit hook is configured but not installed. `hk run` hung for 120 s+ in a scratch repo without `hk.pkl`.
