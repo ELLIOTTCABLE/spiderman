@@ -36,6 +36,9 @@ export const userPromptSubmitInput = object({
    ...hookCommon,
    hook_event_name: literal("UserPromptSubmit"),
    prompt: string,
+   /** Absent on older builds. Known: user | sdk | system | loop_wakeup | schedule_wakeup |
+    * poll_event; "system" covers task notifications and auto-continuation, not the human. */
+   source: optional(string),
 })
 export type UserPromptSubmitInput = ReturnType<typeof userPromptSubmitInput>
 
@@ -81,6 +84,7 @@ export const hookRequest = tagged("kind", {
       ccSessionId: string,
       promptId: optional(string),
       prompt: string,
+      source: optional(string),
       transcriptPath: string,
       cwd: string,
       part,
